@@ -1,0 +1,19 @@
+# Core web framework
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+
+# Database -- async ORM + drivers
+sqlalchemy==2.0.52
+greenlet==3.5.5
+asyncpg==0.31.0
+psycopg[binary,pool]==3.3.4
+psycopg2-binary==2.9.12
+
+# Agent orchestration
+langgraph==1.2.11
+langgraph-checkpoint-postgres==3.1.2
+langchain-google-genai==4.3.5
+
+# Schemas & config
+pydantic==2.13.4
+pydantic-settings==2.15.0

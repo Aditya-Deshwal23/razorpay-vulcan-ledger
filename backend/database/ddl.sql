@@ -1,0 +1,32 @@
+-- ============================================================================
+-- NOT THE SCHEMA. Do not run this file.
+--
+-- The schema lives in backend/database/migrations/, applied by the versioned,
+-- checksummed runner:
+--
+--     cd backend && python -m scripts.migrate            # apply everything pending
+--     cd backend && python -m scripts.migrate --status   # show applied/pending
+--
+-- This file used to be the schema, hand-applied. It was kept as a "readable
+-- overview" and immediately became wrong, which is worse than absent: anyone
+-- who bootstrapped a database from it got a schema the application code cannot
+-- use. Specifically, it still described
+--
+--   * CONSTRAINT unique_bank_entry (bank_name, extracted_utr, credit_amount)
+--     -- deliberately DROPPED in 002_hardening.sql. Because NULLs are DISTINCT
+--     in a UNIQUE constraint, it never constrained a UTR-less credit at all,
+--     which is exactly the case that can double-count money. It is replaced by
+--     a deterministic dedupe_hash plus a partial unique index on the UTR.
+--
+-- and it was missing every column added since: t_bank_ledger.dedupe_hash, and
+-- t_reconciliation_ledger's bank-credit claim constraint, human_decision /
+-- human_decision_by / human_decision_at, ai_reported_variance,
+-- ai_confidence_score, agent_thread_id, batch_run_id.
+--
+-- To read the current schema, read the migrations in order, or ask the database
+-- itself (`\d+ t_bank_ledger` in psql). Both are true by construction; a
+-- hand-maintained copy is only ever true by accident.
+--
+-- Kept as a pointer rather than deleted because external notes and older README
+-- revisions reference this path, and a stale-but-runnable DDL file is a trap.
+-- ============================================================================
