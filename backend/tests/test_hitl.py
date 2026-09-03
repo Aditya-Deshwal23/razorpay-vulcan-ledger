@@ -87,6 +87,7 @@ async def _seed_pending(run_id: str, *, agent_thread_id=None, variance="876.40")
             bank_entry_id=None,
             recon_state="PENDING_HITL_REVIEW",
             numeric_variance=Decimal(variance),
+            evidence_narration=NARRATION,
             cryptographic_state_hash=reconciliation_state_hash(
                 settlement_id=settlement_id,
                 recon_state="PENDING_HITL_REVIEW",
@@ -105,6 +106,11 @@ async def _seed_pending(run_id: str, *, agent_thread_id=None, variance="876.40")
 
 async def _cleanup(run_id: str) -> None:
     async with AsyncSessionLocal() as session:
+        await session.execute(text("SET LOCAL vulcan.allow_audit_maintenance = 'on'"))
+        await session.execute(
+            text("DELETE FROM t_reconciliation_events WHERE settlement_id LIKE :p"),
+            {"p": f"%{run_id}%"},
+        )
         await session.execute(
             text("DELETE FROM t_reconciliation_ledger WHERE settlement_id LIKE :p"),
             {"p": f"%{run_id}%"},
@@ -190,7 +196,7 @@ async def test_approval_resumes_thread_and_commits_verdict():
                 await session.execute(
                     text(
                         "SELECT recon_state, human_decision, human_decision_by, "
-                        "human_decision_at IS NOT NULL AS decided "
+                        "human_decision_at IS NOT NULL AS decided, cryptographic_state_hash "
                         "FROM t_reconciliation_ledger WHERE settlement_id = :s"
                     ),
                     {"s": settlement_id},
@@ -200,6 +206,37 @@ async def test_approval_resumes_thread_and_commits_verdict():
         assert row.human_decision == "APPROVED"
         assert row.human_decision_by == "ops.reviewer"
         assert row.decided is True
+        assert row.cryptographic_state_hash == reconciliation_state_hash(
+            settlement_id=settlement_id,
+            recon_state="HITL_APPROVED",
+            variance=Decimal("876.40"),
+            raw_narration=NARRATION,
+        )
+
+        # A terminal decision must not overwrite the original pending snapshot.
+        # The append-only event ledger holds both auditable states, each with its
+        # own state-correct fingerprint.
+        async with AsyncSessionLocal() as session:
+            events = (
+                await session.execute(
+                    text(
+                        "SELECT event_type, from_state, to_state, cryptographic_state_hash "
+                        "FROM t_reconciliation_events WHERE settlement_id = :s "
+                        "ORDER BY occurred_at, event_id"
+                    ),
+                    {"s": settlement_id},
+                )
+            ).all()
+        assert [(event.event_type, event.from_state, event.to_state) for event in events] == [
+            ("RECONCILIATION_RECORDED", None, "PENDING_HITL_REVIEW"),
+            ("HUMAN_DECISION_RECORDED", "PENDING_HITL_REVIEW", "HITL_APPROVED"),
+        ]
+        assert events[0].cryptographic_state_hash == reconciliation_state_hash(
+            settlement_id=settlement_id,
+            recon_state="PENDING_HITL_REVIEW",
+            variance=Decimal("876.40"),
+            raw_narration=NARRATION,
+        )
     finally:
         await _cleanup(run_id)
 
@@ -429,5 +466,3 @@ async def test_resume_failure_is_raised_as_hitl_resume_error_with_context():
         await resume_agent_thread(_BrokenGraph(), agent_thread_id="thread-1", approved=True)
 
     assert isinstance(excinfo.value.__cause__, ConnectionError)
-
-

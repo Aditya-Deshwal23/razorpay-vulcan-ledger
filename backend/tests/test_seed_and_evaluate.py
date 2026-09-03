@@ -69,8 +69,13 @@ async def _delete_run_rows(*run_ids: str) -> None:
     leaked them into every subsequent run.
     """
     async with AsyncSessionLocal() as session:
+        await session.execute(text("SET LOCAL vulcan.allow_audit_maintenance = 'on'"))
         for run_id in run_ids:
             pattern = f"%{run_id}%"
+            await session.execute(
+                text("DELETE FROM t_reconciliation_events WHERE settlement_id LIKE :p"),
+                {"p": pattern},
+            )
             await session.execute(
                 text("DELETE FROM t_reconciliation_ledger WHERE settlement_id LIKE :p"),
                 {"p": pattern},
@@ -276,6 +281,11 @@ async def test_full_run_persists_and_reports_correctly(capsys, tmp_path):
     # credits are deliberately UTR-less -- matching only on extracted_utr leaked
     # them into every subsequent run.
     async with AsyncSessionLocal() as session:
+        await session.execute(text("SET LOCAL vulcan.allow_audit_maintenance = 'on'"))
+        await session.execute(
+            text("DELETE FROM t_reconciliation_events WHERE settlement_id LIKE :pattern"),
+            {"pattern": f"%{run_id}%"},
+        )
         await session.execute(
             text("DELETE FROM t_reconciliation_ledger WHERE settlement_id LIKE :pattern"), {"pattern": f"%{run_id}%"}
         )

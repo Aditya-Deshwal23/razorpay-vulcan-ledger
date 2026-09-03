@@ -97,6 +97,7 @@ class Settings(BaseSettings):
     razorpay_key_secret: SecretStr = SecretStr("")
     razorpay_webhook_secret: SecretStr = SecretStr("")
     environment: Literal["development", "staging", "production"] = "development"
+    cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
 
     sql_echo: bool = False
     log_level: str = "INFO"
@@ -133,6 +134,11 @@ class Settings(BaseSettings):
         raw = self.database_url.get_secret_value()
         scheme, _, rest = raw.partition("://")
         return f"{scheme.split('+', 1)[0]}://{rest}"
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        """Return normalized browser origins for the HTTP API's CORS policy."""
+        return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
 
     def require_google_api_key(self) -> str:
         """

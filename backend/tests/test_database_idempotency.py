@@ -73,6 +73,11 @@ SELECT encode(
 async def _cleanup(run_id: str) -> None:
     """Delete every row a test wrote, in foreign-key-safe order."""
     async with AsyncSessionLocal() as session:
+        await session.execute(text("SET LOCAL vulcan.allow_audit_maintenance = 'on'"))
+        await session.execute(
+            text("DELETE FROM t_reconciliation_events WHERE settlement_id LIKE :p"),
+            {"p": f"%{run_id}%"},
+        )
         await session.execute(
             text("DELETE FROM t_reconciliation_ledger WHERE settlement_id LIKE :p"),
             {"p": f"%{run_id}%"},
@@ -335,6 +340,7 @@ async def test_two_settlements_cannot_claim_the_same_bank_credit():
                 bank_entry_id=entry_id,
                 recon_state="DETERMINISTIC_MATCH",
                 numeric_variance=Decimal("0.00"),
+                evidence_narration=f"single credit {run_id}",
                 cryptographic_state_hash=reconciliation_state_hash(
                     settlement_id=first_id,
                     recon_state="DETERMINISTIC_MATCH",
@@ -352,6 +358,7 @@ async def test_two_settlements_cannot_claim_the_same_bank_credit():
                     bank_entry_id=entry_id,
                     recon_state="DETERMINISTIC_MATCH",
                     numeric_variance=Decimal("0.00"),
+                    evidence_narration=f"single credit {run_id}",
                     cryptographic_state_hash=reconciliation_state_hash(
                         settlement_id=second_id,
                         recon_state="DETERMINISTIC_MATCH",
@@ -431,6 +438,7 @@ async def test_pipeline_rerun_never_overwrites_a_recorded_human_verdict():
                 bank_entry_id=None,
                 recon_state="PENDING_HITL_REVIEW",
                 numeric_variance=Decimal("876.40"),
+                evidence_narration=narration,
                 cryptographic_state_hash=reconciliation_state_hash(
                     settlement_id=settlement_id,
                     recon_state="PENDING_HITL_REVIEW",
@@ -457,6 +465,7 @@ async def test_pipeline_rerun_never_overwrites_a_recorded_human_verdict():
                 bank_entry_id=None,
                 recon_state="DETERMINISTIC_MATCH",
                 numeric_variance=Decimal("0.00"),
+                evidence_narration=narration,
                 cryptographic_state_hash=reconciliation_state_hash(
                     settlement_id=settlement_id,
                     recon_state="DETERMINISTIC_MATCH",

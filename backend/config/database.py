@@ -477,6 +477,7 @@ class ReconciliationLedger(Base):
     human_decision_by: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     human_decision_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
     batch_run_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    evidence_narration: Mapped[str] = mapped_column(Text, nullable=False)
     cryptographic_state_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     resolved_at: Mapped[datetime] = mapped_column(server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
@@ -485,6 +486,74 @@ class ReconciliationLedger(Base):
         UniqueConstraint("settlement_id", name="unique_settlement_recon"),
         UniqueConstraint("bank_entry_id", name="unique_recon_bank_entry"),
     )
+
+
+class ReconciliationEvent(Base):
+    """An append-only snapshot of a reconciliation state transition.
+
+    The mutable reconciliation row answers the current operational question;
+    this table answers what was recorded, in which order, and with which
+    fingerprint. PostgreSQL rejects UPDATE and DELETE through an accompanying
+    trigger, so ordinary application code can only append a new event.
+    """
+
+    __tablename__ = "t_reconciliation_events"
+
+    event_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    recon_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("t_reconciliation_ledger.recon_id", ondelete="RESTRICT"),
+    )
+    settlement_id: Mapped[str] = mapped_column(
+        String(50),
+        ForeignKey("t_razorpay_settlements.settlement_id", ondelete="RESTRICT"),
+    )
+    batch_run_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    event_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    from_state: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    to_state: Mapped[str] = mapped_column(String(30), nullable=False)
+    human_decision: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    human_decision_by: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    numeric_variance: Mapped[Decimal] = mapped_column(Numeric(15, 2), nullable=False)
+    cryptographic_state_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("recon_id", "to_state", name="unique_reconciliation_event_state"),
+    )
+
+
+async def _append_reconciliation_event(
+    session: AsyncSession,
+    *,
+    row: ReconciliationLedger,
+    event_type: str,
+    from_state: Optional[str],
+) -> None:
+    """Append one immutable state snapshot, converging safely on a retry."""
+    stmt = (
+        pg_insert(ReconciliationEvent)
+        .values(
+            recon_id=row.recon_id,
+            settlement_id=row.settlement_id,
+            batch_run_id=row.batch_run_id,
+            event_type=event_type,
+            from_state=from_state,
+            to_state=row.recon_state,
+            human_decision=(
+                row.human_decision if event_type == "HUMAN_DECISION_RECORDED" else None
+            ),
+            human_decision_by=(
+                row.human_decision_by if event_type == "HUMAN_DECISION_RECORDED" else None
+            ),
+            numeric_variance=row.numeric_variance,
+            cryptographic_state_hash=row.cryptographic_state_hash,
+        )
+        .on_conflict_do_nothing(constraint="unique_reconciliation_event_state")
+    )
+    await session.execute(stmt)
 
 
 # ---------------------------------------------------------------------------
@@ -705,6 +774,7 @@ async def upsert_reconciliation(
     bank_entry_id: Optional[uuid.UUID],
     recon_state: str,
     numeric_variance: Decimal,
+    evidence_narration: str,
     cryptographic_state_hash: str,
     ai_classification_reason: Optional[str] = None,
     ai_reported_variance: Optional[Decimal] = None,
@@ -734,7 +804,10 @@ async def upsert_reconciliation(
             when no credit could be identified.
         recon_state: one of RECON_STATES.
         numeric_variance: the deterministic variance, as a Decimal.
-        cryptographic_state_hash: from reconciliation_state_hash().
+        evidence_narration: exact bank narration used as the immutable evidence
+            text for this reconciliation and its fingerprint.
+        cryptographic_state_hash: from reconciliation_state_hash(), checked
+            against evidence_narration before any row is written.
         ai_classification_reason: the agent's category, or None for a purely
             deterministic match.
         ai_reported_variance: the agent's self-reported variance, or None.
@@ -766,11 +839,33 @@ async def upsert_reconciliation(
             "author, and its timestamp atomically with the state."
         )
 
+    if not isinstance(evidence_narration, str) or not evidence_narration.strip():
+        raise ValueError("evidence_narration must be a non-empty string")
+
+    variance = quantize_money(numeric_variance, "numeric_variance")
+    expected_hash = reconciliation_state_hash(
+        settlement_id=settlement_id,
+        recon_state=recon_state,
+        variance=variance,
+        raw_narration=evidence_narration,
+    )
+    if cryptographic_state_hash != expected_hash:
+        raise ValueError(
+            "cryptographic_state_hash does not match settlement_id, recon_state, "
+            "numeric_variance, and evidence_narration"
+        )
+
+    previous_state = await session.scalar(
+        select(ReconciliationLedger.recon_state).where(
+            ReconciliationLedger.settlement_id == settlement_id
+        )
+    )
+
     values = dict(
         settlement_id=settlement_id,
         bank_entry_id=bank_entry_id,
         recon_state=recon_state,
-        numeric_variance=quantize_money(numeric_variance, "numeric_variance"),
+        numeric_variance=variance,
         ai_classification_reason=ai_classification_reason,
         ai_reported_variance=(
             None if ai_reported_variance is None
@@ -779,6 +874,7 @@ async def upsert_reconciliation(
         ai_confidence_score=ai_confidence_score,
         agent_thread_id=agent_thread_id,
         batch_run_id=batch_run_id,
+        evidence_narration=evidence_narration,
         cryptographic_state_hash=cryptographic_state_hash,
     )
 
@@ -808,6 +904,16 @@ async def upsert_reconciliation(
         raise
 
     if row is not None:
+        await _append_reconciliation_event(
+            session,
+            row=row,
+            event_type=(
+                "RECONCILIATION_RECORDED"
+                if previous_state is None
+                else "RECONCILIATION_RECLASSIFIED"
+            ),
+            from_state=previous_state,
+        )
         return row, True
 
     # The DO UPDATE's WHERE excluded this row: a human decision is already
@@ -981,6 +1087,14 @@ async def record_human_decision(
             "be decided."
         )
 
+    next_state = HUMAN_DECISION_STATES[normalized]
+    next_hash = reconciliation_state_hash(
+        settlement_id=settlement_id,
+        recon_state=next_state,
+        variance=row.numeric_variance,
+        raw_narration=row.evidence_narration,
+    )
+
     result = await session.execute(
         update(ReconciliationLedger)
         .where(
@@ -988,10 +1102,11 @@ async def record_human_decision(
             ReconciliationLedger.recon_state == "PENDING_HITL_REVIEW",
         )
         .values(
-            recon_state=HUMAN_DECISION_STATES[normalized],
+            recon_state=next_state,
             human_decision=normalized,
             human_decision_by=decided_by.strip(),
             human_decision_at=func.now(),
+            cryptographic_state_hash=next_hash,
         )
     )
     if not result.rowcount:
@@ -1003,4 +1118,10 @@ async def record_human_decision(
         )
 
     await session.refresh(row)
+    await _append_reconciliation_event(
+        session,
+        row=row,
+        event_type="HUMAN_DECISION_RECORDED",
+        from_state="PENDING_HITL_REVIEW",
+    )
     return row, True

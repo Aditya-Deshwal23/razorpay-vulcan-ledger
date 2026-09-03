@@ -381,6 +381,7 @@ async def _process_record(
                 bank_entry_id=bank_entry_id,
                 recon_state=recon_state,
                 numeric_variance=math_result.variance,
+                evidence_narration=record.narration,
                 cryptographic_state_hash=reconciliation_state_hash(
                     settlement_id=record.settlement_id,
                     recon_state=recon_state,
@@ -566,6 +567,5 @@ async def run_evaluation(
 
 if __name__ == "__main__":
     asyncio.run(run_evaluation())
-
 
 
