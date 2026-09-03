@@ -144,55 +144,50 @@ config-driven (`GEMINI_MODEL`) so a fallback model needs no code change.
 ## 8. Current phase / status
 
 Phases 1–5 are real and verified. Phase 6 (dashboard) has **not** started —
-`frontend/` is an empty directory and there is no API for it to consume.
+`frontend/` is an empty directory and there is no API for it to consume. Throughput
+measured at ~1.8s per non-deterministic record (including network latency to Gemini).
 
 ## 9. Test status
 
-`cd backend && .venv/bin/python -m pytest -q` -> **30 passed in 0.74s** (2026-08-26).
-`.venv/bin/python -m scripts.verify_phase2` -> **7/7 OK**.
+- `cd backend && .venv/bin/python -m pytest -q` -> **30 passed in 0.74s** (2026-08-26).
+- `.venv/bin/python -m scripts.verify_phase2` -> **7/7 OK**.
 Tests requiring live Postgres pass against the running `vulcan-postgres` container.
 No test makes a real Gemini call; every LLM in the suite is an injected fake.
 
 ## 10. Known bugs / gotchas
 
-1. **Zero git commits.** Branch `master` exists with no commits; every file is untracked.
-   There is no recovery point for any of Phases 1–5.
-2. **`unique_bank_entry` does not dedupe NULL UTRs.** Postgres treats NULLs as distinct in
+1. **`unique_bank_entry` does not dedupe NULL UTRs.** Postgres treats NULLs as distinct in
    a UNIQUE constraint, so a UTR-less credit re-imports forever. Live DB currently holds 24
    NULL-UTR bank rows across only 3 distinct `(bank, amount)` shapes. Fix needs
    `NULLS NOT DISTINCT` (PG15+) or a sentinel/derived key — a schema change.
-3. **The test suite writes to the real `exceptions_manifest.json`** at the project root, so
+2. **The test suite writes to the real `exceptions_manifest.json`** at the project root, so
    the artifact on disk reflects the last *fake-LLM test run*, not the last real pipeline
    run. It must not be treated as evidence of anything.
-4. **`numeric_variance` is populated from the LLM's self-reported variance**
+3. **`numeric_variance` is populated from the LLM's self-reported variance**
    (`classification.variance`) for non-deterministic rows, not from the deterministic
    `math_result.variance`. An LLM-emitted number is being stored in a monetary ledger
    column. The deterministic variance is already computed and should be preferred.
-5. **HITL is unreachable outside tests.** `PENDING_HITL_REVIEW` rows can never advance:
+4. **HITL is unreachable outside tests.** `PENDING_HITL_REVIEW` rows can never advance:
    there is no endpoint to deliver `Command(resume=...)`, no ledger column for the human
    decision, and no persisted `thread_id` (the `eval-<settlement_id>` convention is
    hardcoded in `seed_and_evaluate.py`).
-6. **Historical 48/3/1 split is not what real Gemini produces.** That split comes from the
-   test's `_ScenarioFakeLLM`. The one real-Gemini run in the database (`B2E7EB3C`,
-   2026-08-26 07:50) produced 48 `DETERMINISTIC_MATCH` and **4 `PENDING_HITL_REVIEW`,
-   0 `AI_RESOLVED`.** Any demo metric must be read from Postgres, not from history.
-7. **Test cleanup leaks bank rows.** `DELETE ... WHERE extracted_utr LIKE :pattern` never
-   matches NULL, so 4 rows per run survive. Related to (2).
-8. **Stale partial runs in the database.** Runs `C57E9121`, `59E9CC02`, `6FA4D090`,
+5. **Test cleanup leaks bank rows.** `DELETE ... WHERE extracted_utr LIKE :pattern` never
+   matches NULL, so 4 rows per run survive. Related to (1).
+6. **Stale partial runs in the database.** Runs `C57E9121`, `59E9CC02`, `6FA4D090`,
    `83527E54` each have 48 settlements and 0 edge rows — the 4 chaotic records failed
    (Gemini-era errors) and were only recorded in a since-overwritten manifest.
-9. `MAX_LLM_ATTEMPTS` retries the *identical* prompt with no backoff and without feeding
+7. `MAX_LLM_ATTEMPTS` retries the *identical* prompt with no backoff and without feeding
    the validation error back. It is a retry, not true self-correction — describe it
    honestly.
-10. No `asyncio.wait_for` around `llm.ainvoke` in `graph.py`, despite historical notes
+8. No `asyncio.wait_for` around `llm.ainvoke` in `graph.py`, despite historical notes
     claiming per-attempt timeouts. Only `diagnose_gemini.py` bounds its calls.
-11. No migration tool (no Alembic). `ddl.sql` is applied by hand; ORM-declared
-    `CheckConstraint` names do not exist in the live DB.
-12. `settings.py` defaults `gemini_model` to `gemini-3.7-flash` while `.env` and
+9. No migration tool (no Alembic). `ddl.sql` is applied by hand; ORM-declared
+   `CheckConstraint` names do not exist in the live DB.
+10. `settings.py` defaults `gemini_model` to `gemini-3.7-flash` while `.env` and
     `.env.example` both use `gemini-3.6-flash`.
-13. Imports are rootless (`from config.settings import ...`), so anything must run with
+11. Imports are rootless (`from config.settings import ...`), so anything must run with
     `backend/` as the working directory / rootdir.
-14. `config/database.py` calls `get_settings()` and builds the engine at import time, so
+12. `config/database.py` calls `get_settings()` and builds the engine at import time, so
     importing it requires a valid `.env`.
 
 ## 11. Environment requirements

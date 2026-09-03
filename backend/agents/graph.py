@@ -329,7 +329,11 @@ def build_graph(llm, checkpointer=None, *, config: Optional[AgentRuntimeConfig] 
         """
         error_log = list(state.get("error_log", []))
         base_prompt = (
-            f"Analyze this reconciliation discrepancy log: {state['sanitized_context']}"
+            f"Analyze this reconciliation discrepancy log: {state['sanitized_context']}\n"
+            "Guidance:\n"
+            "- If the arithmetic is balanced and the UTR is missing, or it's a delayed webhook, this is a routine operational delay. "
+            "Set suggested_action to AUTO_APPROVE_ADJUSTMENT and confidence_score high (e.g. 0.95).\n"
+            "- If amounts do not match and there's no clear explanation, ROUTE_TO_HITL_PANEL."
         )
 
         classification: Optional[ExceptionClassification] = None

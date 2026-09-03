@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import date
@@ -73,6 +74,7 @@ from config.database import (
     upsert_reconciliation,
     upsert_settlement,
 )
+from core.matcher import find_bank_credit
 from core.money import money_to_str
 from core.rules_engine import DeterministicRulesEngine
 from parsers.mt940_processor import LegacyBankParser
@@ -210,6 +212,16 @@ def generate_synthetic_batch(run_id: str) -> list[SyntheticRecord]:
             bank_credit=Decimal("976.40"),
             expected_state="AI_RESOLVED",
         ),
+        dict(
+            desc="ambiguous_multi_credit",
+            # Two bank credits of the same amount on the same day, no UTR.
+            # core/matcher.py's select_bank_credit correctly refuses to guess
+            # and returns AMBIGUOUS, which routes to PENDING_HITL_REVIEW.
+            narration=f"/TXT/NEFT-ambiguous duplicate credit batch {run_id}",
+            adjustments=Decimal("123.45"),
+            bank_credit=Decimal("852.95"),
+            expected_state="PENDING_HITL_REVIEW",
+        ),
     ]
     for i, scenario in enumerate(chaotic):
         records.append(
@@ -326,6 +338,25 @@ async def _process_record(
             )
             await session.commit()
 
+        # Step 1b: Multi-candidate matching via core/matcher.py.
+        # After the bank credit and settlement are committed, check whether
+        # more than one unreconciled credit could plausibly belong to this
+        # settlement.  If matcher returns AMBIGUOUS, route straight to HITL
+        # without calling the LLM -- the matcher honestly refuses to guess
+        # between equally good candidates, and the LLM has no information
+        # the matcher lacks to break the tie.
+        match_outcome = None
+        if utr is None:
+            async with AsyncSessionLocal() as session:
+                match_outcome = await find_bank_credit(
+                    session,
+                    bank_name=record.bank_name,
+                    expected_net=math_result.expected_net,
+                    settlement_date=record.transaction_date,
+                    settlement_utr=utr,
+                    window_days=3,
+                )
+
         # Step 2: reason about it, holding nothing open. A deterministic match
         # never reaches the agent at all -- that is the point of having one.
         classification = None
@@ -333,7 +364,21 @@ async def _process_record(
         manifest_entry = None
         sanitized_context = None
 
-        if math_result.is_resolved and utr is not None:
+        if match_outcome is not None and match_outcome.status == "AMBIGUOUS":
+            # The matcher found multiple equally plausible bank credits.
+            # No LLM call -- this is a data ambiguity only a human can resolve.
+            recon_state = "PENDING_HITL_REVIEW"
+            manifest_entry = {
+                "settlement_id": record.settlement_id,
+                "batch_run_id": run_id,
+                "scenario": record.scenario,
+                "variance": money_to_str(math_result.variance),
+                "reason": "AMBIGUOUS_BANK_CREDIT_MATCH",
+                "match_explanation": match_outcome.explanation,
+                "candidates_considered": [str(c) for c in match_outcome.considered],
+                "raw_context": f"Matcher returned AMBIGUOUS: {match_outcome.explanation}",
+            }
+        elif math_result.is_resolved and utr is not None:
             recon_state = "DETERMINISTIC_MATCH"
         else:
             sanitized_context = _sanitized_context(record, math_result, utr)
@@ -527,9 +572,29 @@ async def run_evaluation(
     }
     exceptions: list[dict] = []
 
+    # Seed a SECOND bank credit with the same amount, bank, and date but a
+    # different narration for the ambiguous_multi_credit scenario.  When
+    # _process_record later creates the scenario's OWN credit, find_bank_credit
+    # will see two unreconciled credits that are each within tolerance and
+    # within the date window -- and correctly return AMBIGUOUS.
+    ambiguous_records = [r for r in batch if r.scenario == "ambiguous_multi_credit"]
+    for ar in ambiguous_records:
+        async with AsyncSessionLocal() as session:
+            await get_or_create_bank_entry(
+                session,
+                bank_name=ar.bank_name,
+                transaction_date=ar.transaction_date,
+                credit_amount=ar.bank_credit,
+                raw_narration=f"NEFT-duplicate credit seeded for ambiguity test {run_id}",
+                extracted_utr=None,
+            )
+            await session.commit()
+
     async with graph_context_manager() as graph:
+        t0 = time.monotonic()
         for record in batch:
             await _process_record(record, graph, run_id, metrics, exceptions)
+        elapsed = time.monotonic() - t0
 
     total = metrics["total_processed"]
     total_matches = metrics["deterministic_matches"] + metrics["ai_matches"]
@@ -548,6 +613,11 @@ async def run_evaluation(
         print(f"Processing Errors:        {metrics['processing_errors']}")
     print(f"Final Match Rate:         {metrics['match_rate']}%")
     print(f"Ground-Truth Accuracy:    {metrics['ground_truth_accuracy']}%")
+    records_per_sec = total / elapsed if elapsed > 0 else float("inf")
+    metrics["elapsed_seconds"] = round(elapsed, 2)
+    metrics["records_per_sec"] = round(records_per_sec, 2)
+    print(f"Elapsed Time:             {elapsed:.2f}s")
+    print(f"Throughput:               {records_per_sec:.2f} records/sec")
     if metrics["ground_truth_disagreements"]:
         # Printed, not hidden behind a percentage: a disagreement names a record
         # whose classification a human should look at.
