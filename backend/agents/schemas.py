@@ -120,6 +120,12 @@ class ExceptionClassification(BaseModel):
         return Decimal(self.variance_str)
 
 
+class BatchExceptionClassifications(BaseModel):
+    """Ordered classifications returned for one bounded batch prompt."""
+
+    classifications: list[ExceptionClassification]
+
+
 class IngestionSanitizer(BaseModel):
     """
     Strict validation and sanitization for untrusted CSV/Bank inputs.

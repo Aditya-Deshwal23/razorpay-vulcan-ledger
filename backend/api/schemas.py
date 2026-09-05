@@ -26,6 +26,11 @@ class StateCounts(BaseModel):
 class BatchSummary(BaseModel):
     batch_run_id: str
     original_file_name: Optional[str] = None
+    total_uploaded_entries: Optional[int] = None
+    status: Literal["accepted", "processing", "completed", "failed"] = "completed"
+    resolved_count: int = 0
+    rule_matched_count: int = 0
+    exceptions_count: int = 0
     last_activity_at: datetime
     total: int
     auto_reconciled: int
@@ -47,6 +52,7 @@ class ReviewItem(BaseModel):
     discrepancy_reason: Optional[str]
     rca_reason: Optional[str] = None
     deterministic_variance: str
+    variance_amount: Optional[str]
     ai_reported_variance: Optional[str]
     confidence_score: Optional[float]
     expected_net: str
@@ -78,6 +84,7 @@ class SettlementListItem(BaseModel):
     expected_net: str
     bank_credit: Optional[str]
     deterministic_variance: str
+    variance_amount: Optional[str]
     bank_name: Optional[str]
     settlement_utr: Optional[str]
     bank_utr: Optional[str]
@@ -112,6 +119,7 @@ class SettlementDetail(BaseModel):
     raw_narration: str
     is_bank_reconciled: Optional[bool]
     deterministic_variance: str
+    variance_amount: Optional[str]
     ai_reported_variance: Optional[str]
     discrepancy_reason: Optional[str]
     rca_reason: Optional[str] = None
@@ -128,12 +136,14 @@ class AuditEvent(BaseModel):
     event_id: str
     settlement_id: str
     batch_run_id: Optional[str]
+    original_file_name: Optional[str] = None
     event_type: str
     from_state: Optional[ReconState]
     to_state: ReconState
     human_decision: Optional[str]
     human_decision_by: Optional[str]
     deterministic_variance: str
+    variance_amount: Optional[str]
     cryptographic_state_hash: str
     occurred_at: datetime
 
@@ -192,3 +202,9 @@ class BatchAcceptedResponse(BaseModel):
     batch_id: str
     records: int
     original_file_name: str
+
+
+class BatchDeleteResponse(BaseModel):
+    status: Literal["deleted"]
+    batch_id: str
+    deleted_records: int

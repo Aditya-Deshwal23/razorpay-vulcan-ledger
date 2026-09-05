@@ -151,8 +151,8 @@ engine = create_async_engine(
     settings.database_url.get_secret_value(),
     echo=settings.sql_echo,
     pool_pre_ping=True,
-    pool_size=5,
-    max_overflow=10,
+    pool_size=20,
+    max_overflow=20,
 )
 
 AsyncSessionLocal = async_sessionmaker(
@@ -350,6 +350,13 @@ class BatchRegistry(Base):
     original_file_name: Mapped[str] = mapped_column(
         String(255), nullable=False, default="settlements.csv"
     )
+    total_records: Mapped[int] = mapped_column(nullable=False, default=0)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="accepted")
+    processed_records: Mapped[int] = mapped_column(nullable=False, default=0)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    resolved_count: Mapped[int] = mapped_column(nullable=False, default=0)
+    rule_matched_count: Mapped[int] = mapped_column(nullable=False, default=0)
+    exceptions_count: Mapped[int] = mapped_column(nullable=False, default=0)
     uploaded_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
 
@@ -1209,7 +1216,7 @@ async def get_next_batch_id(session: AsyncSession, source: str = "CSV_UPLOAD") -
 
 
 async def register_batch(
-    session: AsyncSession, batch_id: str, original_file_name: str
+    session: AsyncSession, batch_id: str, original_file_name: str, total_records: int
 ) -> BatchRegistry:
     """Persist upload metadata while converging safely on duplicate retries."""
     stmt = (
@@ -1218,6 +1225,8 @@ async def register_batch(
             batch_id=batch_id,
             source="CSV_UPLOAD",
             original_file_name=original_file_name[:255],
+            total_records=total_records,
+            status="processing",
         )
         .on_conflict_do_nothing(index_elements=["batch_id"])
         .returning(BatchRegistry)

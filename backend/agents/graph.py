@@ -61,7 +61,7 @@ from typing import Literal, Optional, TypedDict
 from langgraph.graph import END, StateGraph
 from langgraph.types import interrupt
 
-from agents.schemas import ExceptionClassification
+from agents.schemas import BatchExceptionClassifications, ExceptionClassification
 from core.money import parse_money
 from core.rules_engine import MATCH_TOLERANCE
 
@@ -173,6 +173,7 @@ class SandboxedAgentState(TypedDict, total=False):
     human_decision: Optional[str]
     rca_reason: Optional[str]
     error_log: list[str]
+    precomputed_classification: Optional[dict]
 
 
 def classification_from_state(state) -> Optional[ExceptionClassification]:
@@ -372,7 +373,13 @@ def _derive_rca_reason(classification: ExceptionClassification) -> str:
     return "; ".join(parts)
 
 
-def build_graph(llm, checkpointer=None, *, config: Optional[AgentRuntimeConfig] = None):
+def build_graph(
+    llm,
+    checkpointer=None,
+    *,
+    config: Optional[AgentRuntimeConfig] = None,
+    batch_llm=None,
+):
     """
     Compile the sandboxed reconciliation graph.
 
@@ -439,7 +446,12 @@ def build_graph(llm, checkpointer=None, *, config: Optional[AgentRuntimeConfig] 
         last_error: Optional[BaseException] = None
         infrastructure_failure = False
 
+        precomputed = state.get("precomputed_classification")
+
         for attempt in range(1, runtime.max_attempts + 1):
+            if precomputed is not None:
+                classification = ExceptionClassification.model_validate(precomputed)
+                break
             prompt = base_prompt
             if last_error is not None:
                 # Self-correction, not a re-roll: the model is told precisely how
@@ -593,7 +605,40 @@ def build_graph(llm, checkpointer=None, *, config: Optional[AgentRuntimeConfig] 
     )
     builder.add_edge("human_in_the_loop", END)
 
-    return builder.compile(checkpointer=checkpointer)
+    compiled = builder.compile(checkpointer=checkpointer)
+
+    async def batch_ainvoke(items: list[dict]) -> list[dict]:
+        """Classify bounded groups in one structured model call each."""
+        if batch_llm is None:
+            return []
+        async def classify_chunk(chunk: list[dict]) -> list[dict]:
+            prompt = (
+                "Classify each numbered reconciliation exception independently. "
+                "Return exactly one classification per item in the same order.\n"
+                + "\n".join(
+                    f"[{index}] settlement_id={item['settlement_id']}\n{item['sanitized_context']}"
+                    for index, item in enumerate(chunk, start=1)
+                )
+                + "\nUse ROUTE_TO_HITL_PANEL whenever evidence is insufficient."
+            )
+            response = await asyncio.wait_for(
+                batch_llm.ainvoke(prompt), timeout=runtime.timeout_seconds
+            )
+            if not isinstance(response, BatchExceptionClassifications):
+                raise TypeError("batch structured output was not BatchExceptionClassifications")
+            if len(response.classifications) != len(chunk):
+                raise ValueError(
+                    f"batch returned {len(response.classifications)} classifications for "
+                    f"{len(chunk)} records"
+                )
+            return [classification.model_dump() for classification in response.classifications]
+
+        chunks = [items[offset : offset + 10] for offset in range(0, len(items), 10)]
+        classified_chunks = await asyncio.gather(*(classify_chunk(chunk) for chunk in chunks))
+        return [classification for chunk in classified_chunks for classification in chunk]
+
+    setattr(compiled, "batch_ainvoke", batch_ainvoke)
+    return compiled
 
 @asynccontextmanager
 async def reconciliation_graph():
@@ -632,17 +677,22 @@ async def reconciliation_graph():
     from config.settings import get_settings
 
     settings = get_settings()
-    llm = ChatGoogleGenerativeAI(
+    model = ChatGoogleGenerativeAI(
         model=settings.gemini_model,
         google_api_key=settings.require_google_api_key(),
-    ).with_structured_output(ExceptionClassification)
+    )
+    llm = model.with_structured_output(ExceptionClassification)
+    batch_llm = model.with_structured_output(BatchExceptionClassifications)
 
     async with AsyncPostgresSaver.from_conn_string(
         settings.checkpointer_database_url.get_secret_value()
     ) as checkpointer:
         await checkpointer.setup()
         yield build_graph(
-            llm, checkpointer, config=AgentRuntimeConfig.from_settings(settings)
+            llm,
+            checkpointer,
+            config=AgentRuntimeConfig.from_settings(settings),
+            batch_llm=batch_llm,
         )
 
 
