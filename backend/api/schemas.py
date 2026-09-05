@@ -25,6 +25,7 @@ class StateCounts(BaseModel):
 
 class BatchSummary(BaseModel):
     batch_run_id: str
+    original_file_name: Optional[str] = None
     last_activity_at: datetime
     total: int
     auto_reconciled: int
@@ -40,9 +41,11 @@ class BatchListResponse(BaseModel):
 
 class ReviewItem(BaseModel):
     settlement_id: str
+    record_id: Optional[str] = None
     batch_run_id: Optional[str]
     recon_state: ReconState
     discrepancy_reason: Optional[str]
+    rca_reason: Optional[str] = None
     deterministic_variance: str
     ai_reported_variance: Optional[str]
     confidence_score: Optional[float]
@@ -69,6 +72,7 @@ class ReviewQueueResponse(BaseModel):
 
 class SettlementListItem(BaseModel):
     settlement_id: str
+    record_id: Optional[str] = None
     batch_run_id: Optional[str]
     recon_state: ReconState
     expected_net: str
@@ -89,6 +93,7 @@ class SettlementListResponse(BaseModel):
 
 class SettlementDetail(BaseModel):
     settlement_id: str
+    record_id: Optional[str] = None
     status: str
     batch_run_id: Optional[str]
     recon_state: ReconState
@@ -109,6 +114,7 @@ class SettlementDetail(BaseModel):
     deterministic_variance: str
     ai_reported_variance: Optional[str]
     discrepancy_reason: Optional[str]
+    rca_reason: Optional[str] = None
     confidence_score: Optional[float]
     human_decision: Optional[str]
     human_decision_by: Optional[str]
@@ -156,3 +162,33 @@ class HealthResponse(BaseModel):
     status: Literal["ok"]
     database: Literal["connected"]
     gemini_model: str
+
+
+# ---------------------------------------------------------------------------
+# CSV Upload schemas
+# ---------------------------------------------------------------------------
+class CsvUploadRowResult(BaseModel):
+    """Result for a single row in the upload batch."""
+    record_id: str
+    settlement_id: str
+    recon_state: str
+    rca_reason: Optional[str] = None
+    error: Optional[str] = None
+
+
+class CsvUploadResponse(BaseModel):
+    """Legacy synchronous upload result (kept for typed clients)."""
+    batch_id: str
+    total_rows: int
+    ingested: int
+    exceptions: int
+    warnings: list[str]
+    rows: list[CsvUploadRowResult]
+
+
+class BatchAcceptedResponse(BaseModel):
+    """Immediate acknowledgement from POST /api/batches/upload."""
+    status: Literal["accepted"]
+    batch_id: str
+    records: int
+    original_file_name: str

@@ -20,6 +20,7 @@ Currency handling:
 """
 from __future__ import annotations
 
+import re
 from decimal import Decimal
 from typing import Literal
 
@@ -53,6 +54,7 @@ class ExceptionClassification(BaseModel):
         "INCORRECT_FEE_LOGGING",
         "DELAYED_WEBHOOK_DELIVERY",
         "UNKNOWN_UNRESOLVABLE",
+        "AI_UNAVAILABLE",
     ] = Field(description="Best-fit category for why the deterministic engine could not match this settlement.")
 
     variance_str: str = Field(
@@ -116,3 +118,29 @@ class ExceptionClassification(BaseModel):
         could exist.
         """
         return Decimal(self.variance_str)
+
+
+class IngestionSanitizer(BaseModel):
+    """
+    Strict validation and sanitization for untrusted CSV/Bank inputs.
+
+    Prevents indirect prompt injections from altering LLM behavior by stripping
+    adversarial instruction patterns, limiting character sets to safe financial
+    characters, and capping the maximum string length. Any text extracted from
+    SWIFT MT940 narrations, CSV remarks, or bank references must pass through
+    this sanitizer before being composed into an LLM prompt string.
+    """
+
+    raw_text: str
+
+    @field_validator("raw_text")
+    @classmethod
+    def sanitize_input(cls, v: str) -> str:
+        """Strip adversarial instruction patterns and limit character sets."""
+        suspicious_patterns = (
+            r"(?i)(ignore previous|system prompt|instruction|bypass|override|forget|you are a)"
+        )
+        sanitized = re.sub(suspicious_patterns, "[REDACTED]", v)
+        # Restrict to safe financial/alphanumeric characters only.
+        sanitized = re.sub(r"[^\w\s\-\/\:\.,#@]", "", sanitized)
+        return sanitized[:250].strip()

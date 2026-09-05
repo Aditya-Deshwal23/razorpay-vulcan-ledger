@@ -97,7 +97,7 @@ class Settings(BaseSettings):
     razorpay_key_secret: SecretStr = SecretStr("")
     razorpay_webhook_secret: SecretStr = SecretStr("")
     environment: Literal["development", "staging", "production"] = "development"
-    cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
+    cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001,http://127.0.0.1:3001"
 
     sql_echo: bool = False
     log_level: str = "INFO"

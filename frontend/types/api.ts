@@ -15,6 +15,7 @@ export type StateCounts = {
 
 export type BatchSummary = {
   batch_run_id: string;
+  original_file_name: string | null;
   last_activity_at: string;
   total: number;
   auto_reconciled: number;
@@ -26,9 +27,11 @@ export type BatchSummary = {
 
 export type ReviewItem = {
   settlement_id: string;
+  record_id: string | null;
   batch_run_id: string | null;
   recon_state: ReconState;
   discrepancy_reason: string | null;
+  rca_reason: string | null;
   deterministic_variance: string;
   ai_reported_variance: string | null;
   confidence_score: number | null;
@@ -50,6 +53,7 @@ export type ReviewItem = {
 
 export type SettlementListItem = {
   settlement_id: string;
+  record_id: string | null;
   batch_run_id: string | null;
   recon_state: ReconState;
   expected_net: string;
@@ -63,6 +67,7 @@ export type SettlementListItem = {
 
 export type SettlementDetail = {
   settlement_id: string;
+  record_id: string | null;
   status: string;
   batch_run_id: string | null;
   recon_state: ReconState;
@@ -83,6 +88,7 @@ export type SettlementDetail = {
   deterministic_variance: string;
   ai_reported_variance: string | null;
   discrepancy_reason: string | null;
+  rca_reason: string | null;
   confidence_score: number | null;
   human_decision: string | null;
   human_decision_by: string | null;
@@ -113,3 +119,9 @@ export type Health = {
 };
 
 export type ApiError = Error & { status?: number; code?: string };
+
+export type BatchUploadResponse = {
+  status: "accepted";
+  batch_id: string;
+  records: number;
+};

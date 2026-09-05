@@ -1,11 +1,12 @@
 import { ArrowRight, Bot, CheckCircle2, CircleDot, ClipboardCheck, Fingerprint, ShieldAlert, ShieldCheck } from "lucide-react";
+import { memo, useMemo } from "react";
 import Link from "next/link";
 
 import { Money } from "@/components/primitives";
 import { absoluteMoney, exceptionTitle } from "@/lib/format";
 import type { BatchSummary, ReviewItem } from "@/types/api";
 
-export function ReconciliationRail({ summary }: { summary: BatchSummary }) {
+export const ReconciliationRail = memo(function ReconciliationRail({ summary }: { summary: BatchSummary }) {
   const parts = [
     { key: "deterministic_match", label: "Rules matched", count: summary.state_counts.deterministic_match, tone: "matched" },
     { key: "ai_resolved", label: "AI-resolved", count: summary.state_counts.ai_resolved, tone: "ai" },
@@ -31,10 +32,22 @@ export function ReconciliationRail({ summary }: { summary: BatchSummary }) {
       </div>
     </section>
   );
-}
+}, (previous, next) => (
+  previous.summary.total === next.summary.total
+  && previous.summary.human_resolved === next.summary.human_resolved
+  && previous.summary.match_rate === next.summary.match_rate
+  && previous.summary.state_counts.deterministic_match === next.summary.state_counts.deterministic_match
+  && previous.summary.state_counts.ai_resolved === next.summary.state_counts.ai_resolved
+  && previous.summary.state_counts.pending_hitl_review === next.summary.state_counts.pending_hitl_review
+));
 
-export function OverviewMetrics({ summary, priority }: { summary: BatchSummary; priority?: ReviewItem }) {
-  const reviewHref = priority ? `/review?batch=${encodeURIComponent(summary.batch_run_id)}&settlement=${encodeURIComponent(priority.settlement_id)}` : `/review?batch=${encodeURIComponent(summary.batch_run_id)}`;
+export const OverviewMetrics = memo(function OverviewMetrics({ summary, priority }: { summary: BatchSummary; priority?: ReviewItem }) {
+  const reviewHref = useMemo(
+    () => priority
+      ? `/review?batch=${encodeURIComponent(summary.batch_run_id)}&settlement=${encodeURIComponent(priority.settlement_id)}`
+      : `/review?batch=${encodeURIComponent(summary.batch_run_id)}`,
+    [priority, summary.batch_run_id],
+  );
   return (
     <>
       <section className="overview-verdict">
@@ -58,14 +71,22 @@ export function OverviewMetrics({ summary, priority }: { summary: BatchSummary; 
           )}
         </div>
       </section>
-      <section className="metrics-strip" aria-label="Run summary">
-        <article><CircleDot size={17} aria-hidden="true" /><span><strong>{summary.state_counts.deterministic_match}</strong> matched by rules</span></article>
-        <article><CircleDot size={17} aria-hidden="true" /><span><strong>{summary.state_counts.ai_resolved}</strong> AI-resolved</span></article>
-        <article><ClipboardCheck size={17} aria-hidden="true" /><span><strong>{summary.human_resolved}</strong> human decisions</span></article>
+      <section className="metrics-strip" aria-label="Track 04 metrics">
+        <article><CircleDot size={17} aria-hidden="true" /><span><strong>{summary.total}</strong> total uploaded entries</span></article>
+        <article><ShieldCheck size={17} aria-hidden="true" /><span><strong>{summary.match_rate}%</strong> successfully verified</span></article>
+        <article><ClipboardCheck size={17} aria-hidden="true" /><span><strong>{summary.needs_review}</strong> exceptions needing review</span></article>
       </section>
     </>
   );
-}
+}, (previous, next) => (
+  previous.summary.batch_run_id === next.summary.batch_run_id
+  && previous.summary.total === next.summary.total
+  && previous.summary.auto_reconciled === next.summary.auto_reconciled
+  && previous.summary.needs_review === next.summary.needs_review
+  && previous.summary.match_rate === next.summary.match_rate
+  && previous.priority?.settlement_id === next.priority?.settlement_id
+  && previous.priority?.deterministic_variance === next.priority?.deterministic_variance
+));
 
 export function VarianceComparison({ deterministic, reported }: { deterministic: string; reported: string | null }) {
   const aligned = reported === deterministic;

@@ -32,6 +32,10 @@ export function conciseId(value: string, start = 11, end = 7) {
   return value.length > start + end + 1 ? `${value.slice(0, start)}…${value.slice(-end)}` : value;
 }
 
+export function shortId(value: string) {
+  return value.length > 8 ? `${value.slice(0, 8)}…` : value;
+}
+
 export function absoluteMoney(value: string) {
   return value.startsWith("-") ? value.slice(1) : value;
 }

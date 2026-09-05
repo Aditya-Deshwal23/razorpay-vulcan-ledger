@@ -2,26 +2,36 @@
 
 import { ArrowRight, BookOpenText, ClipboardCheck, Fingerprint, Landmark, ShieldAlert } from "lucide-react";
 import Link from "next/link";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
+import { useEffect, useMemo, useState } from "react";
 
 import { AuditTable } from "@/components/audit-table";
+import { BatchUploader } from "@/components/batch-uploader";
 import { EmptyState, InlineError, Money, SurfaceSkeleton } from "@/components/primitives";
 import { OverviewMetrics } from "@/components/metrics";
 import { api } from "@/lib/api";
 import { compareAbsoluteMoney, exceptionTitle, formatDate, sumAbsoluteMoney } from "@/lib/format";
 import { useBatches, useResource } from "@/lib/hooks";
-import type { ReviewItem } from "@/types/api";
+import type { ApiError, ReviewItem } from "@/types/api";
 
 export default function OverviewPage() {
   const params = useSearchParams();
+  const router = useRouter();
   const batchResource = useBatches();
+  const [acceptedUpload, setAcceptedUpload] = useState<{ batchId: string; records: number } | null>(null);
   const batchRunId = params.get("batch") ?? batchResource.batches[0]?.batch_run_id;
   const summaryResource = useResource(
-    () => api.summary(batchRunId as string),
+    () => {
+      if (!batchRunId) return Promise.resolve(null);
+      return api.summary(batchRunId).catch((error: ApiError) => {
+        if (error.status === 404) return null;
+        throw error;
+      });
+    },
     [batchRunId],
   );
   const auditResource = useResource(
-    () => api.audit({ batchRunId, limit: 5 }),
+    () => batchRunId ? api.audit({ batchRunId, limit: 5 }) : Promise.resolve({ items: [] } as any),
     [batchRunId],
   );
   const reviewResource = useResource(
@@ -29,15 +39,73 @@ export default function OverviewPage() {
     [batchRunId],
   );
 
+  function bindAcceptedBatch(batchId: string, _records: number) {
+    setAcceptedUpload({ batchId, records: _records });
+    router.push(`/?batch=${encodeURIComponent(batchId)}`);
+    batchResource.refresh();
+    window.dispatchEvent(new Event("vulcan:batch-state-changed"));
+  }
+
+  useEffect(() => {
+    if (!batchRunId) return;
+    const started = Date.now();
+    const timer = window.setInterval(() => {
+      if (Date.now() - started > 180000) {
+        window.clearInterval(timer);
+        return;
+      }
+      batchResource.refresh();
+      summaryResource.refresh();
+      auditResource.refresh();
+      reviewResource.refresh();
+    }, 2000);
+    return () => window.clearInterval(timer);
+    // Refresh handles are stable enough for a batch-scoped poller.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [batchRunId]);
+
+  const processingProgress = acceptedUpload?.batchId === batchRunId && acceptedUpload.records > 0 && summaryResource.data
+    ? Math.min(100, Math.round((summaryResource.data.total / acceptedUpload.records) * 100))
+    : 0;
+  const uploader = <div className="overview-uploader"><BatchUploader onSuccess={bindAcceptedBatch} progress={processingProgress} /></div>;
+
   if (batchResource.loading && !batchRunId) return <OverviewSkeleton />;
   if (batchResource.error) return <PageFrame><InlineError error={batchResource.error} retry={batchResource.refresh} /></PageFrame>;
-  if (!batchRunId) return <PageFrame><EmptyState title="No reconciliation batches yet" body="Run a reconciliation batch to populate the ledger and surface controller exceptions." /></PageFrame>;
-  if (summaryResource.loading || !summaryResource.data) return <OverviewSkeleton />;
+  if (!batchRunId) return (
+    <PageFrame>
+      <header className="page-heading page-heading-overview">
+        <div>
+          <p className="eyebrow">Reconciliation control tower</p>
+          <h1>Money, accounted for.</h1>
+          <p className="page-intro">Upload a Razorpay settlement CSV to start your first reconciliation run.</p>
+        </div>
+      </header>
+      {uploader}
+    </PageFrame>
+  );
   if (summaryResource.error) return <PageFrame><InlineError error={summaryResource.error} retry={summaryResource.refresh} /></PageFrame>;
+  if (summaryResource.loading || !summaryResource.data) {
+    return (
+      <PageFrame>
+        <header className="page-heading page-heading-overview">
+          <div>
+            <p className="eyebrow">Reconciliation control tower</p>
+            <h1>Money, accounted for.</h1>
+            <p className="page-intro">Processing batch <code>{batchRunId}</code> — waiting for ledger writes.</p>
+          </div>
+        </header>
+        {uploader}
+        <OverviewSkeleton />
+      </PageFrame>
+    );
+  }
 
   const summary = summaryResource.data;
   const reviewItems = reviewResource.data?.items ?? [];
-  const priority = [...reviewItems].sort((left, right) => compareAbsoluteMoney(right.deterministic_variance, left.deterministic_variance))[0];
+  const priority = useMemo(
+    () => [...reviewItems].sort((left, right) => compareAbsoluteMoney(right.deterministic_variance, left.deterministic_variance))[0],
+    [reviewItems],
+  );
   return (
     <PageFrame>
       <header className="page-heading page-heading-overview">
@@ -46,8 +114,9 @@ export default function OverviewPage() {
           <h1>Money, accounted for.</h1>
           <p className="page-intro">Batch <code>{summary.batch_run_id}</code> · last ledger activity {formatDate(summary.last_activity_at, true)}</p>
         </div>
-        <div className="batch-stamp"><span>Run scope</span><strong>{summary.total} settlements</strong></div>
       </header>
+
+      {uploader}
 
       <OverviewMetrics summary={summary} priority={priority} />
 

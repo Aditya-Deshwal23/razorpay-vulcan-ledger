@@ -3,7 +3,7 @@
 import Link from "next/link";
 
 import { HashFingerprint, Money, StateBadge } from "@/components/primitives";
-import { formatDate } from "@/lib/format";
+import { formatDate, shortId } from "@/lib/format";
 import type { AuditEvent } from "@/types/api";
 
 function eventLabel(event: AuditEvent) {
@@ -26,7 +26,7 @@ export function AuditTable({ events, showBatch = false }: { events: AuditEvent[]
             <tr key={event.event_id}>
               <td className="muted date-cell">{formatDate(event.occurred_at, true)}</td>
               <td><strong>{eventLabel(event)}</strong>{event.human_decision_by ? <small>by {event.human_decision_by}</small> : null}</td>
-              <td><Link href={`/ledger?query=${encodeURIComponent(event.settlement_id)}`} className="mono-link">{event.settlement_id}</Link></td>
+              <td><Link href={`/ledger?query=${encodeURIComponent(event.settlement_id)}`} className="mono-link" title={event.settlement_id}>{shortId(event.settlement_id)}</Link></td>
               {showBatch ? <td><code>{event.batch_run_id ?? "—"}</code></td> : null}
               <td className="transition-cell">{event.from_state ? <StateBadge state={event.from_state} /> : <span className="muted">Created</span>}<span className="transition-arrow">→</span><StateBadge state={event.to_state} /></td>
               <td><Money value={event.deterministic_variance} /></td>

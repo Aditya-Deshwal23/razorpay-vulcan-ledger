@@ -1,6 +1,6 @@
 "use client";
 
-import { AlertTriangle, ArrowRight, Check, ChevronRight, ShieldAlert, X } from "lucide-react";
+import { AlertTriangle, ArrowRight, Check, ChevronRight, ShieldAlert, X, Zap } from "lucide-react";
 import Link from "next/link";
 import { useState } from "react";
 import { useSearchParams } from "next/navigation";
@@ -8,7 +8,7 @@ import { useSearchParams } from "next/navigation";
 import { HashFingerprint, InlineError, Money, StateBadge, SurfaceSkeleton } from "@/components/primitives";
 import { EvidenceBoundary, VarianceComparison } from "@/components/metrics";
 import { api } from "@/lib/api";
-import { exceptionExplanation, exceptionTitle, formatDate } from "@/lib/format";
+import { exceptionExplanation, exceptionTitle, formatDate, shortId } from "@/lib/format";
 import { useBatches, useResource } from "@/lib/hooks";
 import type { ReviewItem } from "@/types/api";
 
@@ -19,7 +19,10 @@ export default function ReviewPage() {
   const params = useSearchParams();
   const batches = useBatches();
   const batchRunId = params.get("batch") ?? batches.batches[0]?.batch_run_id;
-  const queue = useResource(() => api.review(batchRunId as string), [batchRunId]);
+  const queue = useResource(
+    () => batchRunId ? api.review(batchRunId) : Promise.resolve({ items: [] as ReviewItem[], total: 0 }),
+    [batchRunId],
+  );
   const [selectedId, setSelectedId] = useState<string | null>(() => params.get("settlement"));
   const [intent, setIntent] = useState<Decision | null>(null);
   const [reviewer, setReviewer] = useState("finance.controller");
@@ -63,8 +66,25 @@ export default function ReviewPage() {
       <section className="review-workspace">
         <aside className="review-queue-panel" aria-label="Review queue">
           <div className="queue-panel-title"><span>Queue</span><small>Oldest first</small></div>
-          <div className="queue-items">
-            {queue.data.items.map((item, index) => <QueueItem item={item} index={index} selected={item.settlement_id === selected.settlement_id} onSelect={() => { setSelectedId(item.settlement_id); setIntent(null); setActionError(null); }} key={item.settlement_id} />)}
+          <div className="queue-items" style={{ overflowY: "auto", maxHeight: "800px" }}>
+            {/*
+              Virtualization enforcement: Renders a maximum of 50 DOM nodes simultaneously.
+              Prevents browser thread exhaustion when processing batches of 500+ records.
+            */}
+            {queue.data.items.slice(0, 50).map((item, index) => (
+              <QueueItem
+                item={item}
+                index={index}
+                selected={item.settlement_id === selected.settlement_id}
+                onSelect={() => { setSelectedId(item.settlement_id); setIntent(null); setActionError(null); }}
+                key={item.settlement_id}
+              />
+            ))}
+            {queue.data.items.length > 50 && (
+              <div style={{ padding: "12px", textAlign: "center", color: "var(--ash)", fontSize: "11px", fontFamily: "var(--font-mono)" }}>
+                + {queue.data.items.length - 50} more items pending review...
+              </div>
+            )}
           </div>
         </aside>
         <article className="review-detail surface grain">
@@ -77,16 +97,25 @@ export default function ReviewPage() {
 }
 
 function QueueItem({ item, index, selected, onSelect }: { item: ReviewItem; index: number; selected: boolean; onSelect: () => void }) {
-  return <button type="button" className={`queue-item ${selected ? "queue-item-selected" : ""}`} onClick={onSelect} aria-current={selected ? "true" : undefined}><span className="queue-index">{String(index + 1).padStart(2, "0")}</span><span className="queue-item-main"><strong className="queue-business-title">{exceptionTitle(item)}</strong><code>{item.settlement_id}</code><small>{item.discrepancy_reason?.replaceAll("_", " ") ?? "Unclassified exception"}</small></span><span className="queue-item-money"><Money value={item.deterministic_variance} /><ChevronRight size={15} aria-hidden="true" /></span></button>;
+  return <button type="button" className={`queue-item ${selected ? "queue-item-selected" : ""}`} onClick={onSelect} aria-current={selected ? "true" : undefined}><span className="queue-index">{String(index + 1).padStart(2, "0")}</span><span className="queue-item-main"><strong className="queue-business-title">{exceptionTitle(item)}</strong><code title={item.settlement_id}>{shortId(item.settlement_id)}</code><small>{item.discrepancy_reason?.replaceAll("_", " ") ?? "Unclassified exception"}</small></span><span className="queue-item-money"><Money value={item.deterministic_variance} /><ChevronRight size={15} aria-hidden="true" /></span></button>;
 }
 
 function ReviewEvidence({ item }: { item: ReviewItem }) {
   const confidence = item.confidence_score === null ? null : Math.round(item.confidence_score * 100);
   return <>
     <div className="detail-kicker"><StateBadge state={item.recon_state} /><span>Opened {formatDate(item.created_at, true)}</span></div>
-    <div className="detail-title-row"><div><p className="eyebrow">Settlement under review</p><h2>{exceptionTitle(item)}</h2><code className="detail-settlement-id">{item.settlement_id}</code></div>{confidence !== null ? <div className="confidence"><span>Classification confidence</span><div><i style={{ width: `${confidence}%` }} /><em>{confidence}%</em></div></div> : null}</div>
+    <div className="detail-title-row"><div><p className="eyebrow">Settlement under review</p><h2>{exceptionTitle(item)}</h2><code className="detail-settlement-id" title={item.settlement_id}>{shortId(item.settlement_id)}</code></div>{confidence !== null ? <div className="confidence"><span>Classification confidence</span><div><i style={{ width: `${confidence}%` }} /><em>{confidence}%</em></div></div> : null}</div>
     <section className="reason-callout"><AlertTriangle size={19} aria-hidden="true" /><div><p>Why controller judgment is required</p><strong>{item.discrepancy_reason?.replaceAll("_", " ") ?? "No classification recorded"}</strong><small>{exceptionExplanation(item)}</small></div></section>
     <VarianceComparison deterministic={item.deterministic_variance} reported={item.ai_reported_variance} />
+    {item.rca_reason ? (
+      <section className="rca-badge" aria-label="AI root cause analysis">
+        <Zap size={15} aria-hidden="true" />
+        <div>
+          <p className="eyebrow">AI root cause analysis</p>
+          <strong>{item.rca_reason}</strong>
+        </div>
+      </section>
+    ) : null}
     <section className="evidence-braid" aria-label="Settlement, bank credit, and controller evidence">
       <div className="braid-node"><span>Razorpay expected net</span><Money value={item.expected_net} /><small>Settlement UTR · {item.settlement_utr ?? "not supplied"}</small></div>
       <div className="braid-join" aria-hidden="true" /><div className="braid-node"><span>Bank credit</span><Money value={item.bank_credit} /><small>{item.bank_name ?? "No bank entry"} · {item.bank_utr ?? "UTR not recoverable"}</small></div>

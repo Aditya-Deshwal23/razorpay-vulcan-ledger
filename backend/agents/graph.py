@@ -52,6 +52,7 @@ Exception vectors handled:
 from __future__ import annotations
 
 import asyncio
+import random
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from decimal import Decimal
@@ -67,14 +68,19 @@ from core.rules_engine import MATCH_TOLERANCE
 #: Default bounded retry count. Kept as a module constant (not only inside
 #: AgentRuntimeConfig) because it is part of this module's documented contract
 #: and appears verbatim in the "attempt N/M" audit lines.
-MAX_LLM_ATTEMPTS = 2
+MAX_LLM_ATTEMPTS = 3
 
 #: Defaults used when no AgentRuntimeConfig is supplied. These are the
 #: production-safe values, not test conveniences -- reconciliation_graph()
 #: overrides them from settings so they can be tuned without a code change.
 DEFAULT_LLM_TIMEOUT_SECONDS = 30.0
-DEFAULT_RETRY_BACKOFF_SECONDS = 0.5
+DEFAULT_RETRY_BACKOFF_SECONDS = 1.0
 DEFAULT_MIN_AUTO_APPROVE_CONFIDENCE = 0.85
+
+#: Hard ceiling on the LLM's financial authority. No AI-suggested AUTO_APPROVE
+#: may pass through _deterministic_guards if the variance exceeds this amount,
+#: regardless of the model's self-reported confidence. Hardcoded, not configurable.
+MAX_AI_FINANCIAL_AUTHORITY = Decimal("100.00")
 
 @dataclass(frozen=True)
 class AgentRuntimeConfig:
@@ -151,6 +157,10 @@ class SandboxedAgentState(TypedDict, total=False):
             overridden auto-approval cannot slip through.
         review_reasons: why review was forced, one plain sentence per reason.
         human_decision: "APPROVED" / "REJECTED", filled in on resume.
+        rca_reason: plain-language root-cause hypothesis derived deterministically
+            from the model's discrepancy_reason, e.g.
+            "Suspected 18% GST calculation mismatch on gateway fees". Always a
+            str when the AI node ran; None if the settlement never reached AI.
         error_log: full audit trail of every failed attempt and every override.
     """
 
@@ -161,6 +171,7 @@ class SandboxedAgentState(TypedDict, total=False):
     requires_human_review: bool
     review_reasons: list[str]
     human_decision: Optional[str]
+    rca_reason: Optional[str]
     error_log: list[str]
 
 
@@ -231,6 +242,16 @@ def _deterministic_guards(
             f"{config.min_auto_approve_confidence:.3f} -- overridden to human review"
         )
 
+    if (
+        classification.suggested_action == "AUTO_APPROVE_ADJUSTMENT"
+        and abs(classification.variance) > MAX_AI_FINANCIAL_AUTHORITY
+    ):
+        reasons.append(
+            f"model requested auto-approve, but variance of {classification.variance} INR "
+            f"exceeds the hardcoded AI financial boundary of {MAX_AI_FINANCIAL_AUTHORITY} INR. "
+            "Mandatory human review triggered."
+        )
+
     if deterministic_variance_str is not None:
         try:
             deterministic_variance = parse_money(
@@ -256,9 +277,15 @@ def _deterministic_guards(
     return reasons
 
 
-def _fallback_classification() -> ExceptionClassification:
+def _fallback_classification(reason: str = "UNKNOWN_UNRESOLVABLE") -> ExceptionClassification:
     """
     The verdict used when the LLM could not be made to produce a valid one.
+
+    Args:
+        reason: the discrepancy_reason to assign. Use "AI_UNAVAILABLE" when
+            failures are infrastructure-related (rate limits, timeouts, 503s)
+            so the audit trail distinguishes a model outage from a genuinely
+            unclassifiable exception. Defaults to "UNKNOWN_UNRESOLVABLE".
 
     Returns:
         A deliberately maximally-cautious ExceptionClassification: an unknown
@@ -267,11 +294,83 @@ def _fallback_classification() -> ExceptionClassification:
         model answer or auto-apply it.
     """
     return ExceptionClassification(
-        discrepancy_reason="UNKNOWN_UNRESOLVABLE",
+        discrepancy_reason=reason,  # type: ignore[arg-type]
         variance_str="0.00",
         suggested_action="ROUTE_TO_HITL_PANEL",
         confidence_score=0.0,
     )
+
+
+# ---------------------------------------------------------------------------
+# RCA (Root Cause Analysis) derivation
+# ---------------------------------------------------------------------------
+# Maps the LLM's classification category to a plain-language hypothesis that
+# a finance controller reads in the review queue. The mapping is deterministic
+# and defined here — NOT inside the LLM prompt — so the hypothesis is stable,
+# auditable, and independent of model drift. Two additional modifiers append
+# to the base message when there is supporting evidence.
+_RCA_BASE: dict[str, str] = {
+    "TEMPORAL_CROSS_SETTLEMENT": (
+        "Cross-settlement adjustment timing offset — credit may have landed "
+        "under an adjacent settlement's window"
+    ),
+    "INCORRECT_FEE_LOGGING": (
+        "Suspected 18% GST calculation mismatch on gateway fees — "
+        "MDR fee may have been logged pre-tax instead of post-tax"
+    ),
+    "DELAYED_WEBHOOK_DELIVERY": (
+        "Delayed webhook delivery — settlement credit is pending bank confirmation; "
+        "retry matching after T+1 banking day"
+    ),
+    "UNKNOWN_UNRESOLVABLE": (
+        "Unresolvable variance — no known rule pattern matches; "
+        "requires manual ledger inspection and bank statement cross-check"
+    ),
+}
+
+
+def _derive_rca_reason(classification: ExceptionClassification) -> str:
+    """
+    Produce a plain-language root-cause analysis (RCA) hypothesis from the
+    model's structured ExceptionClassification.
+
+    The base message comes from _RCA_BASE (deterministic, never model-generated).
+    Two modifiers are appended when the classification data supports them:
+
+    * Low confidence (< 0.5): appends a fractional-rounding caveat, since
+      sub-50% confidence often indicates a borderline case where MDR rounding
+      or partial-period adjustments are the real culprit.
+    * Missing UTR signal (INCORRECT_FEE_LOGGING): appends the specific GST
+      percentage note for the finance team.
+
+    Args:
+        classification: the model's validated verdict from llm_reasoning_node.
+
+    Returns:
+        A single human-readable string, never empty. The fallback is a
+        generic "manual review required" message, so callers never receive None
+        from this function.
+    """
+    base = _RCA_BASE.get(
+        classification.discrepancy_reason,
+        "Unclassified exception — manual controller review required",
+    )
+    parts = [base]
+
+    if classification.confidence_score < 0.50:
+        parts.append(
+            "MDR fractional rounding variance suspected "
+            f"(model confidence {classification.confidence_score:.0%} — below threshold)"
+        )
+
+    if classification.discrepancy_reason == "INCORRECT_FEE_LOGGING":
+        parts.append(
+            "Verify: fee_amount × 1.18 should equal gross_fee_charged; "
+            "any delta indicates pre-tax vs post-tax logging discrepancy"
+        )
+
+    return "; ".join(parts)
+
 
 def build_graph(llm, checkpointer=None, *, config: Optional[AgentRuntimeConfig] = None):
     """
@@ -338,6 +437,7 @@ def build_graph(llm, checkpointer=None, *, config: Optional[AgentRuntimeConfig] 
 
         classification: Optional[ExceptionClassification] = None
         last_error: Optional[BaseException] = None
+        infrastructure_failure = False
 
         for attempt in range(1, runtime.max_attempts + 1):
             prompt = base_prompt
@@ -361,29 +461,41 @@ def build_graph(llm, checkpointer=None, *, config: Optional[AgentRuntimeConfig] 
                         "not ExceptionClassification"
                     )
                 classification = candidate
+                infrastructure_failure = False
                 break
             except asyncio.TimeoutError as exc:
                 last_error = exc
+                infrastructure_failure = True
                 error_log.append(
                     f"attempt {attempt}/{runtime.max_attempts}: TimeoutError: LLM did "
                     f"not respond within {runtime.timeout_seconds}s"
                 )
             except Exception as exc:  # noqa: BLE001 -- deliberately broad: any failure here must degrade, not crash
                 last_error = exc
+                # Identify infrastructure failures (rate limits, service unavailable)
+                # separately from schema/logic failures so the fallback can be labelled
+                # AI_UNAVAILABLE instead of UNKNOWN_UNRESOLVABLE in the audit trail.
+                if "429" in str(exc) or "Too Many Requests" in str(exc) or "503" in str(exc):
+                    infrastructure_failure = True
                 error_log.append(
                     f"attempt {attempt}/{runtime.max_attempts}: {type(exc).__name__}: {exc}"
                 )
 
             if attempt < runtime.max_attempts and runtime.retry_backoff_seconds > 0:
-                # Bounded, attempt-scaled pause. Hammering a rate-limited or
-                # overloaded provider with no pause lengthens the outage.
-                await asyncio.sleep(runtime.retry_backoff_seconds * attempt)
+                # Exponential backoff with random jitter. Avoids the "thundering herd"
+                # effect where all retrying callers hit a rate-limited endpoint in lockstep.
+                backoff_time = (
+                    runtime.retry_backoff_seconds * (2 ** (attempt - 1))
+                    + random.uniform(0, 0.5)
+                )
+                await asyncio.sleep(backoff_time)
 
         if classification is None:
-            classification = _fallback_classification()
+            fallback_reason = "AI_UNAVAILABLE" if infrastructure_failure else "UNKNOWN_UNRESOLVABLE"
+            classification = _fallback_classification(reason=fallback_reason)
             error_log.append(
                 f"all {runtime.max_attempts} attempts failed; falling back to "
-                f"UNKNOWN_UNRESOLVABLE. Last error: "
+                f"{fallback_reason}. Last error: "
                 f"{type(last_error).__name__}: {last_error}"
             )
 
@@ -394,11 +506,14 @@ def build_graph(llm, checkpointer=None, *, config: Optional[AgentRuntimeConfig] 
         )
         error_log.extend(f"deterministic override: {reason}" for reason in reasons)
 
+        rca_reason = _derive_rca_reason(classification)
+
         return {
             # Dumped, not stored as a model: see SandboxedAgentState.classification.
             "classification": classification.model_dump(),
             "requires_human_review": bool(reasons),
             "review_reasons": reasons,
+            "rca_reason": rca_reason,
             "error_log": error_log,
         }
 

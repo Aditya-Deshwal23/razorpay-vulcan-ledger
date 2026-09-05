@@ -96,11 +96,11 @@ async def _delete_run_rows(*run_ids: str) -> None:
 
 def test_generate_synthetic_batch_shape():
     batch = generate_synthetic_batch("TESTRNID")
-    assert len(batch) == 52
+    assert len(batch) == 53
 
     perfect, chaotic = batch[:48], batch[48:]
     assert len(perfect) == 48
-    assert len(chaotic) == 4
+    assert len(chaotic) == 5
 
     banks_seen = {r.bank_name for r in perfect}
     assert banks_seen == {"HDFC", "ICICI", "AXIS"}
@@ -111,7 +111,7 @@ def test_generate_synthetic_batch_shape():
         assert record.gross - record.fees - record.taxes - record.refunds - record.adjustments == record.bank_credit
 
     chaotic_descs = {r.settlement_id.split("_", 4)[-1] for r in chaotic}
-    assert chaotic_descs == {"chargeback", "delayed_webhook", "unresolvable_anomaly", "missing_utr"}
+    assert chaotic_descs == {"chargeback", "delayed_webhook", "unresolvable_anomaly", "missing_utr", "ambiguous_multi_credit"}
 
     # Ground truth must be fixed by construction, not derived from a run.
     assert [r.expected_state for r in perfect] == ["DETERMINISTIC_MATCH"] * 48
@@ -120,6 +120,7 @@ def test_generate_synthetic_batch_shape():
         "AI_RESOLVED",
         "PENDING_HITL_REVIEW",
         "AI_RESOLVED",
+        "PENDING_HITL_REVIEW",
     ]
 
 
@@ -174,41 +175,44 @@ async def test_full_run_persists_and_reports_correctly(capsys, tmp_path):
         manifest_path=manifest_path,
     )
 
-    assert metrics["total_processed"] == 52
+    assert metrics["total_processed"] == 53
     assert metrics["deterministic_matches"] == 48
     assert metrics["ai_matches"] == 3
-    assert metrics["hitl_exceptions"] == 1
+    assert metrics["hitl_exceptions"] == 2
     assert metrics["processing_errors"] == 0
     assert metrics["claim_conflicts"] == 0
-    assert fake_llm.call_count == 4  # only the 4 chaotic records ever reach the agent
+    assert fake_llm.call_count == 4  # ambiguous match goes straight to HITL, skipping LLM
 
     # Every record reached the state the generator says a correct system should.
-    assert metrics["ground_truth_agreements"] == 52
+    assert metrics["ground_truth_agreements"] == 53
     assert metrics["ground_truth_disagreements"] == []
     assert metrics["ground_truth_accuracy"] == "100.00"
-    assert metrics["match_rate"] == "98.08"  # 51/52
+    assert metrics["match_rate"] == "96.23"  # 51/53
     assert metrics["states"] == {
         "DETERMINISTIC_MATCH": 48,
         "AI_RESOLVED": 3,
-        "PENDING_HITL_REVIEW": 1,
+        "PENDING_HITL_REVIEW": 2,
     }
 
     console_output = capsys.readouterr().out
     assert "Final Match Rate:" in console_output
-    assert "98.08%" in console_output  # 51/52
+    assert "96.23%" in console_output  # 51/53
     assert "Ground-Truth Accuracy:    100.00%" in console_output
 
     assert manifest_path.exists()
     manifest = json.loads(manifest_path.read_text())
-    assert len(manifest) == 1
-    assert manifest[0]["reason"] == "UNKNOWN_UNRESOLVABLE"
-    # The DETERMINISTIC variance, reported alongside the model's own claim rather
-    # than replaced by it.
-    assert manifest[0]["variance"] == "876.40"
-    assert manifest[0]["ai_reported_variance"] == "876.40"
-    assert manifest[0]["scenario"] == "unresolvable_anomaly"
-    assert manifest[0]["agent_thread_id"] == f"eval-{manifest[0]['settlement_id']}"
-    assert run_id in manifest[0]["settlement_id"]
+    assert len(manifest) == 2
+    
+    anomaly = next(m for m in manifest if m["scenario"] == "unresolvable_anomaly")
+    assert anomaly["reason"] == "UNKNOWN_UNRESOLVABLE"
+    assert anomaly["variance"] == "876.40"
+    assert anomaly["ai_reported_variance"] == "876.40"
+    assert anomaly["agent_thread_id"] == f"eval-{anomaly['settlement_id']}"
+    assert run_id in anomaly["settlement_id"]
+    
+    ambiguous = next(m for m in manifest if m["scenario"] == "ambiguous_multi_credit")
+    assert ambiguous["reason"] == "AMBIGUOUS_BANK_CREDIT_MATCH"
+    assert ambiguous["variance"] == "0.00"
 
     real_manifest_after = _MANIFEST_PATH.read_bytes() if _MANIFEST_PATH.exists() else None
     assert (
@@ -258,11 +262,11 @@ async def test_full_run_persists_and_reports_correctly(capsys, tmp_path):
             {"run_id": run_id},
         )
 
-    assert settlement_count == 52
-    assert recon_count == 52
+    assert settlement_count == 53
+    assert recon_count == 53
     assert states.get("DETERMINISTIC_MATCH") == 48
     assert states.get("AI_RESOLVED") == 3
-    assert states.get("PENDING_HITL_REVIEW") == 1
+    assert states.get("PENDING_HITL_REVIEW") == 2
 
     assert len(ai_rows) == 4
     assert all(row.batch_run_id == run_id for row in ai_rows)
@@ -352,7 +356,7 @@ async def test_consecutive_batches_do_not_fight_over_the_same_bank_credit(tmp_pa
             assert metrics["states"] == {
                 "DETERMINISTIC_MATCH": 48,
                 "AI_RESOLVED": 3,
-                "PENDING_HITL_REVIEW": 1,
+                "PENDING_HITL_REVIEW": 2,
             }, f"{label} batch reached unexpected states"
 
         # The two batches must own disjoint bank credits: 104 credits, no sharing.
@@ -409,7 +413,7 @@ async def test_rerunning_the_same_batch_converges_instead_of_duplicating(tmp_pat
             assert metrics["states"] == {
                 "DETERMINISTIC_MATCH": 48,
                 "AI_RESOLVED": 3,
-                "PENDING_HITL_REVIEW": 1,
+                "PENDING_HITL_REVIEW": 2,
             }, f"{label} run reached unexpected states"
 
         async with AsyncSessionLocal() as session:
@@ -429,8 +433,8 @@ async def test_rerunning_the_same_batch_converges_instead_of_duplicating(tmp_pat
                 {"p": f"%{run_id}%"},
             )
 
-        assert settlements == 52
-        assert recons == 52
-        assert credits == 52
+        assert settlements == 53
+        assert recons == 53
+        assert credits == 54  # 48 perfect + 1 chargeback + 1 delayed + 1 unresolvable + 1 missing utr + 2 ambiguous = 54
     finally:
         await _delete_run_rows(run_id)

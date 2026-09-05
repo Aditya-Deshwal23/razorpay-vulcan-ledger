@@ -162,6 +162,10 @@ AsyncSessionLocal = async_sessionmaker(
     autoflush=False,
 )
 
+# Background workers must create their own session after the request dependency
+# has been cleaned up.
+async_session_factory = AsyncSessionLocal
+
 
 async def get_db_session() -> AsyncIterator[AsyncSession]:
     """
@@ -327,6 +331,29 @@ class Base(DeclarativeBase):
 
 
 # ---------------------------------------------------------------------------
+# 0. Batch Registry — sequential readable batch IDs (BATCH-001, BATCH-002 …)
+# ---------------------------------------------------------------------------
+class BatchRegistry(Base):
+    """
+    One row per ingested CSV batch. Mirrors t_batch_registry.
+
+    sequence_num is the SERIAL primary key; batch_id is its human-readable form
+    (BATCH-001, BATCH-002 …). Immutable after insert — a batch's identity must
+    never change because record IDs (REC-001 …) inside it are keyed to it.
+    """
+
+    __tablename__ = "t_batch_registry"
+
+    sequence_num: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    batch_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    source: Mapped[str] = mapped_column(String(40), nullable=False, default="CSV_UPLOAD")
+    original_file_name: Mapped[str] = mapped_column(
+        String(255), nullable=False, default="settlements.csv"
+    )
+    uploaded_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+# ---------------------------------------------------------------------------
 # 1. Razorpay Settlements Ledger
 # ---------------------------------------------------------------------------
 class RazorpaySettlement(Base):
@@ -339,6 +366,9 @@ class RazorpaySettlement(Base):
     Net = Gross - Fees - Taxes - Refunds - Adjustments in the database, so no
     code path -- ORM, raw SQL, or a future importer -- can persist a settlement
     whose own numbers disagree with the equation the rules engine computes.
+
+    record_id: within-batch sequential identifier (REC-001 …), set by the CSV
+    upload parser. NULL for webhook / evaluation-runner ingestion paths.
     """
 
     __tablename__ = "t_razorpay_settlements"
@@ -355,6 +385,7 @@ class RazorpaySettlement(Base):
     adjustments: Mapped[Decimal] = mapped_column(Numeric(15, 2), nullable=False, default=Decimal("0.00"))
     net_settlement: Mapped[Decimal] = mapped_column(Numeric(15, 2), nullable=False)
     utr_reference: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    record_id: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
 
@@ -473,6 +504,7 @@ class ReconciliationLedger(Base):
     ai_reported_variance: Mapped[Optional[Decimal]] = mapped_column(Numeric(15, 2), nullable=True)
     ai_confidence_score: Mapped[Optional[Decimal]] = mapped_column(Numeric(4, 3), nullable=True)
     agent_thread_id: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    rca_reason: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
     human_decision: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     human_decision_by: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     human_decision_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
@@ -694,6 +726,7 @@ async def upsert_settlement(
     adjustments: Decimal,
     net_settlement: Decimal,
     utr_reference: Optional[str],
+    record_id: Optional[str] = None,
 ) -> RazorpaySettlement:
     """
     Insert or converge one settlement row, so re-running an import is a no-op
@@ -712,6 +745,8 @@ async def upsert_settlement(
             gross - fees - taxes - refunds - adjustments; checked here so the
             caller gets a named error instead of a raw CHECK violation.
         utr_reference: the UTR Razorpay reported for the payout, or None.
+        record_id: optional within-batch sequential identifier (REC-001 …),
+            set by the CSV upload parser. Preserved on re-import.
 
     Returns:
         The persisted RazorpaySettlement row.
@@ -752,6 +787,7 @@ async def upsert_settlement(
         adjustments=adjustment,
         net_settlement=net,
         utr_reference=utr_reference,
+        record_id=record_id,
     )
 
     stmt = (
@@ -781,6 +817,7 @@ async def upsert_reconciliation(
     ai_confidence_score: Optional[Decimal] = None,
     agent_thread_id: Optional[str] = None,
     batch_run_id: Optional[str] = None,
+    rca_reason: Optional[str] = None,
 ) -> tuple[ReconciliationLedger, bool]:
     """
     Insert or converge the reconciliation verdict for one settlement.
@@ -874,6 +911,7 @@ async def upsert_reconciliation(
         ai_confidence_score=ai_confidence_score,
         agent_thread_id=agent_thread_id,
         batch_run_id=batch_run_id,
+        rca_reason=rca_reason,
         evidence_narration=evidence_narration,
         cryptographic_state_hash=cryptographic_state_hash,
     )
@@ -1125,3 +1163,71 @@ async def record_human_decision(
         from_state="PENDING_HITL_REVIEW",
     )
     return row, True
+
+
+async def get_next_batch_id(session: AsyncSession, source: str = "CSV_UPLOAD") -> str:
+    """
+    Atomically register a new upload batch and return its sequential human-
+    readable identifier (BATCH-001, BATCH-002, …).
+
+    Inserts a row into t_batch_registry, whose SERIAL primary key provides the
+    monotone counter. The identifier is formatted as BATCH-{num:03d} — three
+    zero-padded digits, growing to four when num > 999 rather than truncating.
+
+    Args:
+        session: an active AsyncSession inside a transaction that will commit.
+        source:  the ingestion path, e.g. "CSV_UPLOAD". Informational only.
+
+    Returns:
+        A new, unique batch identifier string, e.g. "BATCH-001".
+
+    Raises:
+        sqlalchemy.exc.OperationalError: if t_batch_registry does not exist yet
+            (migration has not been applied). Callers should handle this with
+            a clear "run migrations first" message.
+    """
+    stmt = (
+        pg_insert(BatchRegistry)
+        .values(
+            # batch_id is a placeholder — we need the sequence num first.
+            # We insert a temp placeholder, then update with the real ID.
+            batch_id="PENDING",
+            source=source,
+        )
+        .returning(BatchRegistry.sequence_num)
+    )
+    seq_num: int = (await session.execute(stmt)).scalar_one()
+    batch_id = f"BATCH-{seq_num:03d}"
+
+    # Update the placeholder with the real ID now that we have the sequence.
+    await session.execute(
+        update(BatchRegistry)
+        .where(BatchRegistry.sequence_num == seq_num)
+        .values(batch_id=batch_id)
+    )
+    return batch_id
+
+
+async def register_batch(
+    session: AsyncSession, batch_id: str, original_file_name: str
+) -> BatchRegistry:
+    """Persist upload metadata while converging safely on duplicate retries."""
+    stmt = (
+        pg_insert(BatchRegistry)
+        .values(
+            batch_id=batch_id,
+            source="CSV_UPLOAD",
+            original_file_name=original_file_name[:255],
+        )
+        .on_conflict_do_nothing(index_elements=["batch_id"])
+        .returning(BatchRegistry)
+    )
+    row = (await session.execute(stmt)).scalar_one_or_none()
+    if row is not None:
+        return row
+    existing = await session.scalar(
+        select(BatchRegistry).where(BatchRegistry.batch_id == batch_id)
+    )
+    if existing is None:
+        raise RuntimeError(f"batch {batch_id!r} was not available after registration")
+    return existing

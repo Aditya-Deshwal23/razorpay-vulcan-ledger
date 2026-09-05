@@ -17,3 +17,4 @@ langchain-google-genai==4.3.5
 # Schemas & config
 pydantic==2.13.4
 pydantic-settings==2.15.0
+python-multipart==0.0.32

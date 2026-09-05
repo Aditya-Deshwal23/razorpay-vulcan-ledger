@@ -30,8 +30,11 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=get_settings().cors_origin_list,
     allow_credentials=False,
+    # POST covers both JSON payloads and multipart/form-data file uploads.
     allow_methods=["GET", "POST"],
-    allow_headers=["Content-Type"],
+    # Allow Content-Type (JSON), multipart/form-data, and cache control headers.
+    allow_headers=["Content-Type", "Cache-Control", "X-Requested-With"],
+    expose_headers=["Content-Disposition", "X-Batch-ID", "X-Row-Count"],
 )
 
 app.include_router(reconciliation_router)
