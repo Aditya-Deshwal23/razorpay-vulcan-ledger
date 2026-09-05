@@ -17,9 +17,10 @@ interface BatchUploaderProps {
   /** Called when the backend accepts a batch, with the payload hash and row count */
   onSuccess?: (batchId: string, records: number) => void;
   progress?: number;
+  progressActive?: boolean;
 }
 
-export function BatchUploader({ onSuccess, progress = 0 }: BatchUploaderProps) {
+export function BatchUploader({ onSuccess, progress = 0, progressActive = false }: BatchUploaderProps) {
   const [state, setState] = useState<UploadState>({ phase: "idle" });
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -162,6 +163,11 @@ export function BatchUploader({ onSuccess, progress = 0 }: BatchUploaderProps) {
           &nbsp;or click to browse &mdash; max 10 MB
         </small>
       </div>
+      {progressActive ? (
+        <div className="upload-progress upload-progress-inline" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress} aria-label="Batch reconciliation progress">
+          <span style={{ width: `${progress}%` }} />
+        </div>
+      ) : null}
     </div>
   );
 }

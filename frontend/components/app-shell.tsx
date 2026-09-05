@@ -11,6 +11,7 @@ import {
   Loader2,
   Menu,
   Settings,
+  Trash2,
   Upload,
 } from "lucide-react";
 import Link from "next/link";
@@ -36,6 +37,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [batches, setBatches] = useState<BatchSummary[]>([]);
   const [open, setOpen] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [batchError, setBatchError] = useState<string | null>(null);
   const uploadRef = useRef<HTMLInputElement>(null);
   const selectedBatch = params.get("batch") ?? batches[0]?.batch_run_id ?? "";
 
@@ -43,8 +46,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     try {
       const response = await api.batches();
       setBatches(response.items);
-    } catch {
-      setBatches([]);
+      setBatchError(null);
+    } catch (caught) {
+      setBatchError(caught instanceof Error ? caught.message : "Unable to load reconciliation runs.");
     }
   }, []);
 
@@ -80,8 +84,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       const anchor = document.createElement("a");
       anchor.href = url;
       const originalName = batches.find((batch) => batch.batch_run_id === selectedBatch)?.original_file_name;
-      const stem = originalName?.replace(/\.[^.]+$/, "") || shortId(selectedBatch);
-      anchor.download = `${stem}_audited.csv`;
+      const sourceName = originalName || `${shortId(selectedBatch)}.csv`;
+      anchor.download = `audited_${sourceName}`;
       anchor.click();
       URL.revokeObjectURL(url);
     } catch {
@@ -102,6 +106,20 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       // Silently ignore — the BatchUploader on the overview page shows errors.
     } finally {
       if (uploadRef.current) uploadRef.current.value = "";
+    }
+  }
+
+  async function handleDelete() {
+    if (!selectedBatch || deleting) return;
+    if (!window.confirm("Delete this batch and all of its audit records?")) return;
+    setDeleting(true);
+    try {
+      await api.deleteBatch(selectedBatch);
+      setBatches((current) => current.filter((batch) => batch.batch_run_id !== selectedBatch));
+      router.replace("/");
+      window.dispatchEvent(new Event("vulcan:batch-state-changed"));
+    } finally {
+      setDeleting(false);
     }
   }
 
@@ -142,11 +160,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <button type="button" className="mobile-menu icon-button" aria-label="Open navigation" onClick={() => setOpen(true)}>
             <Menu size={20} aria-hidden="true" />
           </button>
+          <div className="topbar-controls">
           <div className="batch-select-wrap">
             <label htmlFor="batch-select">Viewing run</label>
             <div className="select-frame">
               <select id="batch-select" value={selectedBatch} onChange={(event) => selectBatch(event.target.value)} disabled={!selectedBatch && !batches.length}>
-                {!batches.length && !selectedBatch ? <option>Loading runs…</option> : null}
+                {!batches.length && !selectedBatch ? <option value="">{batchError ? "Runs unavailable" : "Loading runs…"}</option> : null}
                 {selectedBatch && !batches.some((batch) => batch.batch_run_id === selectedBatch) ? (
                   <option value={selectedBatch}>{shortId(selectedBatch)} (processing)</option>
                 ) : null}
@@ -154,7 +173,19 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               </select>
               <ChevronDown size={15} aria-hidden="true" />
             </div>
+            {batchError ? <button type="button" className="batch-retry" onClick={() => void refreshBatches()}>Retry</button> : null}
           </div>
+          <button
+            type="button"
+            className="topbar-button topbar-button-danger"
+            onClick={handleDelete}
+            disabled={!selectedBatch || deleting}
+            title="Delete the selected batch"
+            aria-label="Delete selected batch"
+          >
+            <Trash2 size={15} aria-hidden="true" />
+            <span>{deleting ? "Deleting…" : "Delete Batch"}</span>
+          </button>
           <div className="topbar-actions">
             {/* Upload CSV — quick trigger; full UI with drag-and-drop is on the overview page */}
             <input
@@ -191,6 +222,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               )}
               <span>{exporting ? "Exporting…" : "Export Audit"}</span>
             </button>
+          </div>
           </div>
         </header>
         {children}

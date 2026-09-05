@@ -3,14 +3,14 @@
 import { ArrowRight, BookOpenText, ClipboardCheck, Fingerprint, Landmark, ShieldAlert } from "lucide-react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo } from "react";
 
 import { AuditTable } from "@/components/audit-table";
 import { BatchUploader } from "@/components/batch-uploader";
 import { EmptyState, InlineError, Money, SurfaceSkeleton } from "@/components/primitives";
 import { OverviewMetrics } from "@/components/metrics";
 import { api } from "@/lib/api";
-import { compareAbsoluteMoney, exceptionTitle, formatDate, sumAbsoluteMoney } from "@/lib/format";
+import { compareAbsoluteMoney, exceptionTitle, formatDate, shortId, sumAbsoluteMoney } from "@/lib/format";
 import { useBatches, useResource } from "@/lib/hooks";
 import type { ApiError, ReviewItem } from "@/types/api";
 
@@ -18,7 +18,6 @@ export default function OverviewPage() {
   const params = useSearchParams();
   const router = useRouter();
   const batchResource = useBatches();
-  const [acceptedUpload, setAcceptedUpload] = useState<{ batchId: string; records: number } | null>(null);
   const batchRunId = params.get("batch") ?? batchResource.batches[0]?.batch_run_id;
   const summaryResource = useResource(
     () => {
@@ -38,9 +37,14 @@ export default function OverviewPage() {
     () => batchRunId ? api.review(batchRunId) : Promise.resolve({ items: [], total: 0 }),
     [batchRunId],
   );
+  const isBatchProcessing = Boolean(
+    batchRunId
+    && (!summaryResource.data
+      || summaryResource.data.status === "processing"
+      || summaryResource.data.resolved_count < (summaryResource.data.total_uploaded_entries ?? 0)),
+  );
 
   function bindAcceptedBatch(batchId: string, _records: number) {
-    setAcceptedUpload({ batchId, records: _records });
     router.push(`/?batch=${encodeURIComponent(batchId)}`);
     batchResource.refresh();
     window.dispatchEvent(new Event("vulcan:batch-state-changed"));
@@ -58,16 +62,51 @@ export default function OverviewPage() {
       summaryResource.refresh();
       auditResource.refresh();
       reviewResource.refresh();
-    }, 2000);
+    }, isBatchProcessing ? 1000 : 2000);
     return () => window.clearInterval(timer);
     // Refresh handles are stable enough for a batch-scoped poller.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [batchRunId]);
+  }, [batchRunId, isBatchProcessing]);
 
-  const processingProgress = acceptedUpload?.batchId === batchRunId && acceptedUpload.records > 0 && summaryResource.data
-    ? Math.min(100, Math.round((summaryResource.data.total / acceptedUpload.records) * 100))
+  const reviewItems = useMemo(() => reviewResource.data?.items ?? [], [reviewResource.data?.items]);
+  const priority = useMemo(
+    () => [...reviewItems].sort((left, right) => compareAbsoluteMoney(right.deterministic_variance, left.deterministic_variance))[0],
+    [reviewItems],
+  );
+  const summary = summaryResource.data ?? {
+    batch_run_id: batchRunId ?? "",
+    original_file_name: null,
+    total_uploaded_entries: null,
+    status: "processing",
+    resolved_count: 0,
+    rule_matched_count: 0,
+    exceptions_count: 0,
+    last_activity_at: new Date().toISOString(),
+    total: 0,
+    auto_reconciled: 0,
+    needs_review: 0,
+    human_resolved: 0,
+    match_rate: "0.00",
+    state_counts: {
+      deterministic_match: 0,
+      ai_resolved: 0,
+      pending_hitl_review: 0,
+      hitl_approved: 0,
+      hitl_rejected: 0,
+    },
+  };
+  const totalEntries = summary.total_uploaded_entries ?? summary.total ?? 0;
+  const resolvedEntries = Math.min(
+    summary.resolved_count ?? summary.total,
+    totalEntries || summary.total,
+  );
+  const processingProgress = totalEntries > 0
+    ? Math.min(100, Math.round((resolvedEntries / totalEntries) * 100))
     : 0;
-  const uploader = <div className="overview-uploader"><BatchUploader onSuccess={bindAcceptedBatch} progress={processingProgress} /></div>;
+  const isComplete = summary.status === "completed"
+    || (totalEntries > 0 && resolvedEntries >= totalEntries);
+  const progressActive = Boolean(batchRunId && !isComplete);
+  const uploader = <div className="overview-uploader"><BatchUploader onSuccess={bindAcceptedBatch} progress={processingProgress} progressActive={progressActive} /></div>;
 
   if (batchResource.loading && !batchRunId) return <OverviewSkeleton />;
   if (batchResource.error) return <PageFrame><InlineError error={batchResource.error} retry={batchResource.refresh} /></PageFrame>;
@@ -84,49 +123,66 @@ export default function OverviewPage() {
     </PageFrame>
   );
   if (summaryResource.error) return <PageFrame><InlineError error={summaryResource.error} retry={summaryResource.refresh} /></PageFrame>;
-  if (summaryResource.loading || !summaryResource.data) {
-    return (
-      <PageFrame>
-        <header className="page-heading page-heading-overview">
-          <div>
-            <p className="eyebrow">Reconciliation control tower</p>
-            <h1>Money, accounted for.</h1>
-            <p className="page-intro">Processing batch <code>{batchRunId}</code> — waiting for ledger writes.</p>
-          </div>
-        </header>
-        {uploader}
-        <OverviewSkeleton />
-      </PageFrame>
-    );
-  }
-
-  const summary = summaryResource.data;
-  const reviewItems = reviewResource.data?.items ?? [];
-  const priority = useMemo(
-    () => [...reviewItems].sort((left, right) => compareAbsoluteMoney(right.deterministic_variance, left.deterministic_variance))[0],
-    [reviewItems],
-  );
   return (
     <PageFrame>
       <header className="page-heading page-heading-overview">
         <div>
           <p className="eyebrow">Reconciliation control tower</p>
           <h1>Money, accounted for.</h1>
-          <p className="page-intro">Batch <code>{summary.batch_run_id}</code> · last ledger activity {formatDate(summary.last_activity_at, true)}</p>
+          <p className="page-intro">{summary.original_file_name ?? (summaryResource.loading ? "Loading batch..." : shortId(summary.batch_run_id))} · {summaryResource.loading ? "processing live" : `last ledger activity ${formatDate(summary.last_activity_at, true)}`}</p>
         </div>
       </header>
 
+      <BatchProgressBanner
+        active={Boolean(batchRunId)}
+        complete={isComplete}
+        progress={processingProgress}
+        resolvedEntries={resolvedEntries}
+        totalEntries={totalEntries}
+      />
       {uploader}
 
       <OverviewMetrics summary={summary} priority={priority} />
 
-      {reviewResource.loading ? <div className="overview-lower"><SurfaceSkeleton lines={5} /><SurfaceSkeleton lines={5} /></div> : reviewResource.error ? <InlineError error={reviewResource.error} retry={reviewResource.refresh} /> : <OperationalBrief items={reviewResource.data?.items ?? []} batchRunId={batchRunId} />}
+      {reviewResource.error ? <InlineError error={reviewResource.error} retry={reviewResource.refresh} /> : <OperationalBrief items={reviewResource.data?.items ?? []} batchRunId={batchRunId} />}
 
       <section className="section-block">
         <div className="section-heading"><div><p className="eyebrow">Immutable activity</p><h2>Latest recorded evidence</h2></div><Link href={`/audit?batch=${encodeURIComponent(batchRunId)}`} className="text-link">Open audit trail <ArrowRight size={15} aria-hidden="true" /></Link></div>
-        {auditResource.loading ? <SurfaceSkeleton lines={5} /> : auditResource.error ? <InlineError error={auditResource.error} retry={auditResource.refresh} /> : auditResource.data?.items.length ? <AuditTable events={auditResource.data.items} /> : <EmptyState title="No audit events for this run" body="Events appear when reconciliations or controller decisions are recorded." />}
+        {auditResource.error ? <InlineError error={auditResource.error} retry={auditResource.refresh} /> : auditResource.data?.items.length ? <AuditTable events={auditResource.data.items} /> : <EmptyState title="Processing audit trail" body="Events will appear here as records are reconciled." />}
       </section>
     </PageFrame>
+  );
+}
+
+function BatchProgressBanner({
+  active,
+  complete,
+  progress,
+  resolvedEntries,
+  totalEntries,
+}: {
+  active: boolean;
+  complete: boolean;
+  progress: number;
+  resolvedEntries: number;
+  totalEntries: number;
+}) {
+  if (!active) return null;
+  return (
+    <section className={`batch-progress-banner ${complete ? "batch-progress-complete" : ""}`} aria-live="polite">
+      <div className="batch-progress-status">
+        {!complete ? <span className="batch-progress-dot" aria-hidden="true" /> : null}
+        <strong>
+          {complete
+            ? "Reconciliation complete — 100% verified"
+            : `Processing batch... (${resolvedEntries} of ${totalEntries} records settled)`}
+        </strong>
+        <span>{progress}% reconciled</span>
+      </div>
+      <div className="batch-progress-track" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress} aria-label="Batch reconciliation progress">
+        <span style={{ width: `${progress}%` }} />
+      </div>
+    </section>
   );
 }
 

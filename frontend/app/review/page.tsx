@@ -97,7 +97,7 @@ export default function ReviewPage() {
 }
 
 function QueueItem({ item, index, selected, onSelect }: { item: ReviewItem; index: number; selected: boolean; onSelect: () => void }) {
-  return <button type="button" className={`queue-item ${selected ? "queue-item-selected" : ""}`} onClick={onSelect} aria-current={selected ? "true" : undefined}><span className="queue-index">{String(index + 1).padStart(2, "0")}</span><span className="queue-item-main"><strong className="queue-business-title">{exceptionTitle(item)}</strong><code title={item.settlement_id}>{shortId(item.settlement_id)}</code><small>{item.discrepancy_reason?.replaceAll("_", " ") ?? "Unclassified exception"}</small></span><span className="queue-item-money"><Money value={item.deterministic_variance} /><ChevronRight size={15} aria-hidden="true" /></span></button>;
+  return <button type="button" className={`queue-item ${selected ? "queue-item-selected" : ""}`} onClick={onSelect} aria-current={selected ? "true" : undefined}><span className="queue-index">{String(index + 1).padStart(2, "0")}</span><span className="queue-item-main"><strong className="queue-business-title">{exceptionTitle(item)}</strong><code title={item.settlement_id}>{shortId(item.settlement_id)}</code><small>{item.discrepancy_reason?.replaceAll("_", " ") ?? "Unclassified exception"}</small></span><span className="queue-item-money"><span className="variance-inline"><Money value={item.variance_amount} /></span><ChevronRight size={15} aria-hidden="true" /></span></button>;
 }
 
 function ReviewEvidence({ item }: { item: ReviewItem }) {
@@ -106,6 +106,7 @@ function ReviewEvidence({ item }: { item: ReviewItem }) {
     <div className="detail-kicker"><StateBadge state={item.recon_state} /><span>Opened {formatDate(item.created_at, true)}</span></div>
     <div className="detail-title-row"><div><p className="eyebrow">Settlement under review</p><h2>{exceptionTitle(item)}</h2><code className="detail-settlement-id" title={item.settlement_id}>{shortId(item.settlement_id)}</code></div>{confidence !== null ? <div className="confidence"><span>Classification confidence</span><div><i style={{ width: `${confidence}%` }} /><em>{confidence}%</em></div></div> : null}</div>
     <section className="reason-callout"><AlertTriangle size={19} aria-hidden="true" /><div><p>Why controller judgment is required</p><strong>{item.discrepancy_reason?.replaceAll("_", " ") ?? "No classification recorded"}</strong><small>{exceptionExplanation(item)}</small></div></section>
+    <div className="prominent-variance"><Money value={item.variance_amount} /> <span>Variance</span></div>
     <VarianceComparison deterministic={item.deterministic_variance} reported={item.ai_reported_variance} />
     {item.rca_reason ? (
       <section className="rca-badge" aria-label="AI root cause analysis">

@@ -16,6 +16,11 @@ export type StateCounts = {
 export type BatchSummary = {
   batch_run_id: string;
   original_file_name: string | null;
+  total_uploaded_entries: number | null;
+  status: "accepted" | "processing" | "completed" | "failed";
+  resolved_count: number;
+  rule_matched_count: number;
+  exceptions_count: number;
   last_activity_at: string;
   total: number;
   auto_reconciled: number;
@@ -33,6 +38,7 @@ export type ReviewItem = {
   discrepancy_reason: string | null;
   rca_reason: string | null;
   deterministic_variance: string;
+  variance_amount: string | null;
   ai_reported_variance: string | null;
   confidence_score: number | null;
   expected_net: string;
@@ -59,6 +65,7 @@ export type SettlementListItem = {
   expected_net: string;
   bank_credit: string | null;
   deterministic_variance: string;
+  variance_amount: string | null;
   bank_name: string | null;
   settlement_utr: string | null;
   bank_utr: string | null;
@@ -86,6 +93,7 @@ export type SettlementDetail = {
   raw_narration: string;
   is_bank_reconciled: boolean | null;
   deterministic_variance: string;
+  variance_amount: string | null;
   ai_reported_variance: string | null;
   discrepancy_reason: string | null;
   rca_reason: string | null;
@@ -102,12 +110,14 @@ export type AuditEvent = {
   event_id: string;
   settlement_id: string;
   batch_run_id: string | null;
+  original_file_name: string | null;
   event_type: string;
   from_state: ReconState | null;
   to_state: ReconState;
   human_decision: string | null;
   human_decision_by: string | null;
   deterministic_variance: string;
+  variance_amount: string | null;
   cryptographic_state_hash: string;
   occurred_at: string;
 };
@@ -124,4 +134,10 @@ export type BatchUploadResponse = {
   status: "accepted";
   batch_id: string;
   records: number;
+};
+
+export type BatchDeleteResponse = {
+  status: "deleted";
+  batch_id: string;
+  deleted_records: number;
 };

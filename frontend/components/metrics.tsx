@@ -42,6 +42,7 @@ export const ReconciliationRail = memo(function ReconciliationRail({ summary }: 
 ));
 
 export const OverviewMetrics = memo(function OverviewMetrics({ summary, priority }: { summary: BatchSummary; priority?: ReviewItem }) {
+  const uploadedEntries = summary.total_uploaded_entries ?? summary.total;
   const reviewHref = useMemo(
     () => priority
       ? `/review?batch=${encodeURIComponent(summary.batch_run_id)}&settlement=${encodeURIComponent(priority.settlement_id)}`
@@ -72,7 +73,7 @@ export const OverviewMetrics = memo(function OverviewMetrics({ summary, priority
         </div>
       </section>
       <section className="metrics-strip" aria-label="Track 04 metrics">
-        <article><CircleDot size={17} aria-hidden="true" /><span><strong>{summary.total}</strong> total uploaded entries</span></article>
+        <article><CircleDot size={17} aria-hidden="true" /><span><strong>{uploadedEntries}</strong> total uploaded entries</span></article>
         <article><ShieldCheck size={17} aria-hidden="true" /><span><strong>{summary.match_rate}%</strong> successfully verified</span></article>
         <article><ClipboardCheck size={17} aria-hidden="true" /><span><strong>{summary.needs_review}</strong> exceptions needing review</span></article>
       </section>

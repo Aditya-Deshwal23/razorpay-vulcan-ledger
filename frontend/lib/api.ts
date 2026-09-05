@@ -2,6 +2,7 @@ import type {
   ApiError,
   AuditEvent,
   BatchSummary,
+  BatchDeleteResponse,
   BatchUploadResponse,
   Health,
   ReconState,
@@ -82,6 +83,8 @@ export const api = {
   health: () => request<Health>("/api/health"),
   batches: () => request<{ items: BatchSummary[] }>("/api/batches"),
   summary: (batchRunId: string) => request<BatchSummary>(`/api/batches/${encodeURIComponent(batchRunId)}/summary`),
+  deleteBatch: (batchRunId: string) =>
+    request<BatchDeleteResponse>(`/api/batches/${encodeURIComponent(batchRunId)}`, { method: "DELETE" }),
   review: (batchRunId: string) =>
     request<{ items: ReviewItem[]; total: number }>(
       `/api/batches/${encodeURIComponent(batchRunId)}/review`,
